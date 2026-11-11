@@ -83,3 +83,27 @@ def backfill(
             else:
                 typer.echo(f"  {date} skip (not a trading day)")
             date += dt.timedelta(days=1)
+
+
+@app.command()
+def status() -> None:
+    """Show freshness per source and Tapetide calls used today."""
+    from equitypulse.audit import status_summary
+    from equitypulse.db.session import session_factory
+
+    with session_factory()() as session:
+        rows = status_summary(session)
+
+    if not rows:
+        typer.echo("No runs recorded yet.")
+        return
+
+    typer.echo(f"{'source':<32}  {'last_ok':<24}  {'rows':>10}")
+    typer.echo("-" * 72)
+    for row in rows:
+        if row.get("calls") is not None:
+            typer.echo(f"  Tapetide calls today: {row['calls']}")
+        else:
+            last = str(row.get("last_ok") or "never")[:24]
+            rows_str = str(row.get("total_rows") or 0)
+            typer.echo(f"{row['source']:<32}  {last:<24}  {rows_str:>10}")
