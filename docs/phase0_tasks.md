@@ -24,6 +24,6 @@ Review the diff, then commit with message `T<n>: <title>` and push. Tick the box
 | [x] | **T12 Smallcase import + name mapping.** Read `data/private/EquityPulse_smallcase_validation_dataset.xlsx` into the smallcase tables; map names to ISIN (exact, then normalised fuzzy match against `securities`); low-confidence names to `data/private/name_map_review.csv` | **Opus** (review the matching) | Row counts match the spec; ≥ 95% mapped; review file produced |
 | [x] | **T13 Audit and status.** `data_audit` written by every job, append-only: a STARTED row when the job begins and a final OK / DEGRADED / FAILED row (same run_id, with `finished_at`) when it ends; a STARTED row with no final row is reported as a crashed run; `ep status` shows freshness per source and Tapetide calls today | Sonnet | Test on a seeded DB |
 | [x] | **T14 Nightly job.** `ep nightly [--date]` runs calendar check → master → bhavcopy → surveillance → audit; skips non-trading days | Sonnet | Rerun writes 0 rows; non-trading day exits cleanly |
-| [ ] | **T15 CI.** GitHub Actions: uv sync, ruff, pytest on push and PR | Sonnet | Green check on GitHub |
+| [x] | **T15 CI.** GitHub Actions: uv sync, ruff, pytest on push and PR | Sonnet | Green check on GitHub |
 
 After T15, run the Phase 0 gate in `docs/phase0_spec.md`, then ask for the Phase 1a spec.
