@@ -10,6 +10,7 @@ Each CSV has columns: Company Name, Industry, Symbol, Series, ISIN Code
 
 import csv
 import io
+import re
 import time
 from collections.abc import Callable
 
@@ -31,6 +32,7 @@ INDEX_FILES = {
 }
 
 SOURCE = "NIFTYINDICES"
+_ISIN_RE = re.compile(r"^IN[A-Z0-9]{10}$")
 
 
 class IndexConstituent(BaseModel):
@@ -97,8 +99,8 @@ def parse_index_csv(text: str, index_name: str) -> list[IndexConstituent]:
     for raw in reader:
         row = {k.strip(): (v.strip() if v else "") for k, v in raw.items()}
         isin = row.get("ISIN Code", "")
-        if not isin or len(isin) != 12:
-            continue
+        if not _ISIN_RE.match(isin):
+            continue  # blank, malformed, or an NSE placeholder such as DUM545A01024 (DUMMYHEG)
         if isin in seen:
             raise NseFormatError(f"{index_name} constituent CSV duplicate ISIN: {isin}")
         seen.add(isin)

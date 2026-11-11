@@ -126,3 +126,10 @@ def test_load_reopens_returning_member(db_session: Session) -> None:
     assert len(all_rows) == 2
     open_rows = [r for r in all_rows if r.date_to is None]
     assert len(open_rows) == 1
+
+
+def test_parse_skips_nse_placeholder_rows() -> None:
+    text = NIFTY500_CSV.rstrip("\n") + "\nDUMMY HEG,Capital Goods,DUMMYHEG,EQ,DUM545A01024\n"
+    rows = parse_index_csv(text, "NIFTY500")
+    assert len(rows) == 10
+    assert "DUM545A01024" not in {r.isin for r in rows}
