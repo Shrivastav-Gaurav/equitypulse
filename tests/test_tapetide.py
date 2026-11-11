@@ -176,3 +176,135 @@ def test_all_wrappers_call_correct_tool(db_session: Session) -> None:
     assert "screen_stocks" in tools_called
     assert "get_index_membership_asof" in tools_called
     assert "get_adjustment_factors" in tools_called
+
+
+# ── review fixes ──────────────────────────────────────────────────────────────
+
+import httpx  # noqa: E402
+
+from equitypulse.sources.tapetide import TapetideError  # noqa: E402
+
+
+def _status_error(code: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "https://mcp.example/mcp")
+    return httpx.HTTPStatusError("boom", request=req, response=httpx.Response(code, request=req))
+
+
+def _flaky(errors: list):
+    calls: list[str] = []
+
+    def caller(tool: str, args: dict) -> dict:
+        calls.append(tool)
+        if errors:
+            raise errors.pop(0)
+        return SAMPLE_PAYLOAD
+
+    return caller, calls
+
+
+def _kw(caller, budget=10):
+    return dict(now=_NOW, _mcp_caller=caller, _budget=budget, _sleep=lambda _s: None)
+
+
+def _call(db_session, caller, budget=10):
+    return call_tool(
+        db_session, "search_stocks", {"q": "x"}, entity="x", as_of=DATE, **_kw(caller, budget)
+    )
+
+
+def test_retries_transient_5xx_then_succeeds(db_session: Session) -> None:
+    caller, calls = _flaky([_status_error(503), httpx.ConnectError("down")])
+    assert _call(db_session, caller)["result"] == "ok"
+    assert len(calls) == 3
+
+
+def test_retries_inside_exception_group(db_session: Session) -> None:
+    caller, calls = _flaky([ExceptionGroup("tg", [httpx.ReadTimeout("slow")])])
+    _call(db_session, caller)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 429])
+def test_never_retries_4xx(db_session: Session, code: int) -> None:
+    caller, calls = _flaky([_status_error(code)])
+    with pytest.raises(httpx.HTTPStatusError):
+        _call(db_session, caller)
+    assert len(calls) == 1
+
+
+def test_4xx_inside_exception_group_not_retried(db_session: Session) -> None:
+    caller, calls = _flaky([ExceptionGroup("tg", [_status_error(401)])])
+    with pytest.raises(ExceptionGroup):
+        _call(db_session, caller)
+    assert len(calls) == 1
+
+
+def test_tool_error_not_retried(db_session: Session) -> None:
+    caller, calls = _flaky([TapetideError("bad tool args")])
+    with pytest.raises(TapetideError):
+        _call(db_session, caller)
+    assert len(calls) == 1
+
+
+def test_gives_up_after_max_attempts(db_session: Session) -> None:
+    caller, calls = _flaky([_status_error(500)] * 5)
+    with pytest.raises(httpx.HTTPStatusError):
+        _call(db_session, caller)
+    assert len(calls) == 3
+
+
+def test_every_attempt_counts_against_budget(db_session: Session) -> None:
+    caller, _ = _flaky([_status_error(500), _status_error(500)])
+    _call(db_session, caller)
+    assert db_session.get(ApiUsage, (DATE, "TAPETIDE")).calls == 3
+
+
+def test_failed_call_still_counts_and_stores_no_snapshot(db_session: Session) -> None:
+    caller, _ = _flaky([_status_error(400)])
+    with pytest.raises(httpx.HTTPStatusError):
+        _call(db_session, caller)
+    assert db_session.get(ApiUsage, (DATE, "TAPETIDE")).calls == 1
+    assert db_session.scalar(select(Snapshot)) is None
+
+
+def test_retries_stop_when_budget_runs_out(db_session: Session) -> None:
+    caller, calls = _flaky([_status_error(500)] * 5)
+    with pytest.raises(BudgetExceededError):
+        _call(db_session, caller, budget=2)
+    assert len(calls) == 2
+
+
+def test_budget_override_requires_injected_caller(db_session: Session) -> None:
+    with pytest.raises(ValueError, match="_budget"):
+        call_tool(
+            db_session, "search_stocks", {"q": "x"}, entity="x", as_of=DATE,
+            now=_NOW, _budget=10**6,
+        )
+
+
+def test_screen_stocks_filters_sharing_a_prefix_do_not_collide(db_session: Session) -> None:
+    prefix = {"sector": "x" * 80}
+    seen: list[dict] = []
+
+    def caller(tool: str, args: dict) -> dict:
+        seen.append(args)
+        return {"n": len(seen)}
+
+    kw = dict(now=_NOW, _mcp_caller=caller, _budget=10)
+    a = screen_stocks(db_session, {**prefix, "min_cap": 1}, as_of=DATE, **kw)
+    b = screen_stocks(db_session, {**prefix, "min_cap": 2}, as_of=DATE, **kw)
+    assert a != b
+    assert len(seen) == 2
+
+
+def test_cache_returns_latest_snapshot_and_snapshots_carry_as_of(db_session: Session) -> None:
+    from equitypulse.snapshots import store_snapshot
+
+    for n in (1, 2):
+        store_snapshot(
+            db_session, source="TAPETIDE", endpoint="search_stocks", entity="x",
+            as_of=DATE, payload={"n": n},
+        )
+    db_session.commit()
+    assert _call(db_session, lambda t, a: {}) == {"n": 2}
+    assert all(s.as_of == DATE for s in db_session.scalars(select(Snapshot)).all())

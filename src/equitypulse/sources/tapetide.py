@@ -12,17 +12,20 @@ other modules.
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import logging
+import time
+from collections.abc import Callable
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from equitypulse.calendar import today_ist
 from equitypulse.config import get_settings
 from equitypulse.db.models import ApiUsage, Snapshot
-from equitypulse.db.types import utcnow
 from equitypulse.snapshots import canonical_json, store_snapshot
 
 SOURCE = "TAPETIDE"
@@ -79,12 +82,15 @@ def _cached_payload(
 ) -> dict[str, Any] | None:
     """Return the cached payload for (tool, entity, as_of) if one exists, else None."""
     row = session.scalar(
-        select(Snapshot).where(
+        select(Snapshot)
+        .where(
             Snapshot.source == SOURCE,
             Snapshot.endpoint == tool,
             Snapshot.entity == entity,
             Snapshot.as_of == as_of,
         )
+        .order_by(Snapshot.id.desc())
+        .limit(1)
     )
     if row is None:
         return None
@@ -132,6 +138,31 @@ async def _call_mcp_tool(tool: str, arguments: dict[str, Any]) -> dict[str, Any]
                 ) from exc
 
 
+# ── retries ───────────────────────────────────────────────────────────────────
+
+MAX_ATTEMPTS = 3
+BACKOFF_SECONDS = 1.0
+
+
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """Flatten exception groups: anyio task groups wrap the real error."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for inner in exc.exceptions for leaf in _leaves(inner)]
+    return [exc]
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Network errors and 5xx are transient. Any 4xx (bad request, auth, rate limit) or a
+    tool-level error is not: retrying would burn budget for the same answer."""
+    for leaf in _leaves(exc):
+        if isinstance(leaf, httpx.HTTPStatusError):
+            if leaf.response.status_code < 500:
+                return False
+        elif not isinstance(leaf, httpx.TransportError | TimeoutError | ConnectionError):
+            return False
+    return True
+
+
 # ── public call_tool ──────────────────────────────────────────────────────────
 
 
@@ -144,16 +175,20 @@ def call_tool(
     as_of: dt.date | None = None,
     now: dt.datetime | None = None,
     _mcp_caller: Any = None,  # injectable for tests
-    _budget: int | None = None,  # injectable for tests; overrides settings
+    _budget: int | None = None,  # test-only override; requires _mcp_caller
+    _sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Call a Tapetide MCP tool, respecting budget and caching.
 
-    - `entity`: logical identifier for the cache key (e.g. ISIN or index name).
+    - `entity`: logical identifier for the cache key; it must determine `arguments`.
     - `as_of`: the date the data is valid for; defaults to today_ist().
-    - `_mcp_caller`: async callable (tool, args) → dict, injectable for testing.
+    - `_mcp_caller`: callable (tool, args) → dict, injectable for testing.
 
+    Every attempt, including retries and failures, counts against the daily budget.
     Does not commit; the caller owns the transaction.
     """
+    if _budget is not None and _mcp_caller is None:
+        raise ValueError("_budget override is only allowed together with an injected _mcp_caller")
     if as_of is None:
         as_of = today_ist(now)
 
@@ -162,10 +197,20 @@ def call_tool(
         log.debug("Tapetide cache hit: tool=%s entity=%s as_of=%s", tool, entity, as_of)
         return cached
 
-    _check_budget(session, now, budget=_budget)
-
     caller = _mcp_caller or (lambda t, a: asyncio.run(_call_mcp_tool(t, a)))
-    payload = caller(tool, arguments)
+    payload: dict[str, Any] = {}
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        _check_budget(session, now, budget=_budget)
+        _record_call(session, now)
+        session.flush()
+        try:
+            payload = caller(tool, arguments)
+            break
+        except Exception as exc:
+            if attempt == MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+            log.warning("Tapetide %s attempt %d failed (%s); retrying", tool, attempt, exc)
+            _sleep(BACKOFF_SECONDS * 2 ** (attempt - 1))
 
     store_snapshot(
         session,
@@ -174,9 +219,8 @@ def call_tool(
         entity=entity,
         as_of=as_of,
         payload=payload,
-        fetched_at=utcnow(),
+        fetched_at=now,
     )
-    _record_call(session, now)
     session.flush()
     return payload
 
@@ -213,7 +257,8 @@ def get_forecasts(
 def screen_stocks(
     session: Session, filters: dict[str, Any], *, as_of: dt.date | None = None, **kw: Any
 ) -> dict[str, Any]:
-    entity = canonical_json(filters)[:64]
+    # Hash, not a truncated prefix: two filter sets sharing a prefix must not share a cache key.
+    entity = "sha256:" + hashlib.sha256(canonical_json(filters).encode()).hexdigest()[:32]
     return call_tool(session, "screen_stocks", filters, entity=entity, as_of=as_of, **kw)
 
 

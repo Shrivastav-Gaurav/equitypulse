@@ -169,3 +169,118 @@ def test_map_names_idempotent(db_session: Session) -> None:
         select(func.count()).select_from(NameMap).where(NameMap.raw_name == "Reliance Industries Limited")
     )
     assert count == 1
+
+
+# ── review fixes ──────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _private_review_path(tmp_path, monkeypatch):
+    """Tests must never write to the real data/private/name_map_review.csv."""
+    monkeypatch.setattr(
+        "equitypulse.imports.smallcase._DEFAULT_REVIEW_PATH", tmp_path / "name_map_review.csv"
+    )
+
+
+def _add_sec(session: Session, isin: str, name: str) -> None:
+    session.add(Security(isin=isin, symbol=isin[-6:], name=name, status="ACTIVE", source="TEST", as_of=DATE))
+    session.flush()
+
+
+def test_stock_names_exclude_cash_rows(db_session: Session) -> None:
+    result = import_smallcase(db_session, load_workbook=_load_workbook, now=_NOW)
+    assert result.stock_names == ["HDFC Bank Limited", "Infosys Limited", "Reliance Industries Limited"]
+
+
+def test_import_handles_open_ended_period(db_session: Session) -> None:
+    wb = openpyxl.load_workbook(io.BytesIO(WORKBOOK_BYTES))
+    wb["Constituent_Periods"].append(["SC1", dt.datetime(2024, 4, 1), None, "Infosys Limited", 0.4, False])
+    buf = io.BytesIO()
+    wb.save(buf)
+    import_smallcase(db_session, load_workbook=lambda _p: buf.getvalue(), now=_NOW)
+    open_row = db_session.scalar(select(SmallcasePeriod).where(SmallcasePeriod.period_end.is_(None)))
+    assert open_row is not None
+
+
+def test_ampersand_and_and_are_the_same_word(db_session: Session) -> None:
+    _add_sec(db_session, "INE018A01030", "Larsen & Toubro Limited")
+    map_names(db_session, ["Larsen and Toubro Ltd."])
+    assert db_session.get(NameMap, "Larsen and Toubro Ltd.").isin == "INE018A01030"
+
+
+def test_ltd_vs_limited_with_punctuation(db_session: Session) -> None:
+    _add_sec(db_session, "INE0AAA01011", "Acme Industries Limited")
+    map_names(db_session, ["ACME Industries Ltd."])
+    assert db_session.get(NameMap, "ACME Industries Ltd.").isin == "INE0AAA01011"
+
+
+def test_ambiguous_name_is_not_auto_accepted(db_session: Session) -> None:
+    _add_sec(db_session, "INE0BBB01011", "Foo Holdings Limited")
+    _add_sec(db_session, "INE0BBB01029", "Foo Holdings Ltd")
+    map_names(db_session, ["Foo Holdings"])
+    assert db_session.get(NameMap, "Foo Holdings").isin is None
+
+
+def test_close_sibling_names_are_not_auto_accepted(db_session: Session) -> None:
+    _add_sec(db_session, "INE0CCC01011", "Tata Power Company Limited")
+    _add_sec(db_session, "INE0CCC01029", "Tata Power Renewable Limited")
+    map_names(db_session, ["Tata Power Co"])
+    assert db_session.get(NameMap, "Tata Power Co").isin == "INE0CCC01011"
+    map_names(db_session, ["Tata Power Renew"])
+    assert db_session.get(NameMap, "Tata Power Renew").isin is None
+
+
+def test_threshold_cannot_be_lowered_below_floor(db_session: Session) -> None:
+    _add_sec(db_session, "INE0DDD01011", "Bharat Heavy Electricals Limited")
+    map_names(db_session, ["Bharat Electricals"], fuzzy_threshold=0.1)
+    assert db_session.get(NameMap, "Bharat Electricals").isin is None
+
+
+def test_renamed_company_needs_manual_review_then_override(db_session: Session, tmp_path) -> None:
+    _add_sec(db_session, "INE758T01015", "Eternal Limited")
+    review = tmp_path / "review.csv"
+    map_names(db_session, ["Zomato Ltd"], review_path=review)
+    assert db_session.get(NameMap, "Zomato Ltd").isin is None
+    assert "Zomato Ltd" in review.read_text(encoding="utf-8")
+    review.write_text("raw_name,isin,notes\nZomato Ltd,INE758T01015,renamed\n", encoding="utf-8")
+    map_names(db_session, ["Zomato Ltd"], review_path=review)
+    nm = db_session.get(NameMap, "Zomato Ltd")
+    assert (nm.isin, nm.method, nm.verified) == ("INE758T01015", "manual", True)
+    assert "Zomato Ltd" not in review.read_text(encoding="utf-8")
+
+
+def test_manual_override_with_unknown_isin_is_ignored(db_session: Session, tmp_path) -> None:
+    review = tmp_path / "review.csv"
+    review.write_text("raw_name,isin,notes\nGhost Ltd,INE000000000,x\n", encoding="utf-8")
+    map_names(db_session, ["Ghost Ltd"], review_path=review)
+    assert db_session.get(NameMap, "Ghost Ltd").isin is None
+
+
+def test_unmapped_names_are_retried_after_master_grows(db_session: Session) -> None:
+    map_names(db_session, ["Late Arrival Limited"])
+    assert db_session.get(NameMap, "Late Arrival Limited").isin is None
+    _add_sec(db_session, "INE0EEE01011", "Late Arrival Limited")
+    map_names(db_session, ["Late Arrival Limited"])
+    assert db_session.get(NameMap, "Late Arrival Limited").isin == "INE0EEE01011"
+
+
+def test_review_file_is_rewritten_not_appended(db_session: Session, tmp_path) -> None:
+    review = tmp_path / "review.csv"
+    for _ in range(2):
+        map_names(db_session, ["Nobody Limited"], review_path=review)
+    assert review.read_text(encoding="utf-8").count("Nobody Limited") == 1
+
+
+def test_map_names_links_isin_onto_periods_and_events(db_session: Session) -> None:
+    _seed_securities(db_session)
+    result = import_smallcase(db_session, load_workbook=_load_workbook, now=_NOW)
+    map_names(db_session, result.stock_names)
+    db_session.commit()
+    period_isin = db_session.scalar(
+        select(SmallcasePeriod.isin).where(SmallcasePeriod.raw_name == "Infosys Limited")
+    )
+    event_isin = db_session.scalar(
+        select(SmallcaseEvent.isin).where(SmallcaseEvent.raw_name == "HDFC Bank Limited")
+    )
+    assert period_isin == "INE009A01021"
+    assert event_isin == "INE040A01034"
