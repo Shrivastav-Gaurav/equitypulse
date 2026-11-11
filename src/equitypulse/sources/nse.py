@@ -9,9 +9,19 @@ Holiday list: `GET https://www.nseindia.com/api/holiday-master?type=trading&year
   Saturday), so those are flagged as sessions rather than holidays.
 - Weekend special sessions that NSE does not list (e.g. Budget-day Saturday 2025-02-01) and
   Muhurat trading go in config/calendar_overrides.yaml.
+
+Equity master: `GET https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv`
+(verified 2026-11-11). Returns a CSV with headers:
+  SYMBOL, NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE, MARKET LOT, ISIN NUMBER,
+  FACE VALUE
+Note: some headers have leading/trailing spaces. All listed securities (EQ, BE, BZ, SM, …)
+appear; this file does NOT contain delivery data. The newer UDiFF bhavcopy has ISIN but no
+delivery; `sec_bhavdata_full_DDMMYYYY.csv` has delivery but no ISIN — T6 uses both.
 """
 
+import csv
 import datetime as dt
+import io
 import re
 import time
 from collections.abc import Callable
@@ -21,7 +31,9 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 NSE_HOLIDAY_MASTER_URL = "https://www.nseindia.com/api/holiday-master"
+EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 EQUITY_SEGMENT = "CM"
+_ISIN_RE = re.compile(r"^IN[A-Z0-9]{10}$")
 
 # NSE rejects obvious bots; a browser-like request is the documented workaround.
 BROWSER_HEADERS = {
@@ -88,6 +100,99 @@ def fetch_holiday_master(
     finally:
         if own_client:
             http.close()
+
+
+class EquityRow(BaseModel):
+    """One row from EQUITY_L.csv."""
+
+    model_config = ConfigDict(frozen=True)
+
+    isin: str
+    symbol: str
+    name: str
+    series: str
+    listing_date: dt.date | None
+
+
+def fetch_equity_list(
+    *,
+    client: httpx.Client | None = None,
+    attempts: int = 3,
+    backoff_seconds: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    """Raw CSV text of EQUITY_L.csv. Same retry logic as the holiday-master fetch."""
+    own_client = client is None
+    http = client or httpx.Client(headers=BROWSER_HEADERS, timeout=30.0)
+    try:
+        last_problem = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                response = http.get(EQUITY_LIST_URL, headers=BROWSER_HEADERS)
+            except httpx.TransportError as exc:
+                last_problem = f"network error: {exc.__class__.__name__}"
+            else:
+                if response.status_code == 200:
+                    return response.text
+                if response.status_code not in RETRYABLE_STATUS:
+                    raise NseFetchError(f"NSE EQUITY_L.csv returned HTTP {response.status_code}")
+                last_problem = f"HTTP {response.status_code}"
+            if attempt < attempts:
+                sleep(backoff_seconds * 2 ** (attempt - 1))
+        raise NseFetchError(f"NSE EQUITY_L.csv failed after {attempts} attempts ({last_problem})")
+    finally:
+        if own_client:
+            http.close()
+
+
+def parse_equity_list(text: str) -> list[EquityRow]:
+    """Parse EQUITY_L.csv text into a list of EquityRow.
+
+    Strips leading/trailing spaces from headers and values, validates ISINs, rejects
+    duplicates and empty files.
+    """
+    text = text.strip()
+    if not text:
+        raise NseFormatError("EQUITY_L.csv is empty")
+    reader = csv.DictReader(io.StringIO(text))
+    # Strip spaces from field names (NSE headers have inconsistent spacing).
+    if reader.fieldnames is None:
+        raise NseFormatError("EQUITY_L.csv has no headers")
+    clean_fields = [f.strip() for f in reader.fieldnames]
+    required = {"SYMBOL", "NAME OF COMPANY", "SERIES", "ISIN NUMBER", "DATE OF LISTING"}
+    missing = required - set(clean_fields)
+    if missing:
+        raise NseFormatError(f"EQUITY_L.csv missing columns: {missing}")
+
+    rows: list[EquityRow] = []
+    seen_isins: set[str] = set()
+    for raw in reader:
+        row = {k.strip(): (v.strip() if v else "") for k, v in raw.items()}
+        isin = row.get("ISIN NUMBER", "")
+        if not _ISIN_RE.match(isin):
+            raise NseFormatError(f"EQUITY_L.csv invalid ISIN: {isin!r}")
+        if isin in seen_isins:
+            raise NseFormatError(f"EQUITY_L.csv duplicate ISIN: {isin}")
+        seen_isins.add(isin)
+        date_str = row.get("DATE OF LISTING", "")
+        try:
+            listing_date: dt.date | None = dt.datetime.strptime(date_str, "%d-%b-%Y").date()
+        except ValueError:
+            if date_str:
+                raise NseFormatError(f"EQUITY_L.csv bad listing_date: {date_str!r}") from None
+            listing_date = None
+        rows.append(
+            EquityRow(
+                isin=isin,
+                symbol=row["SYMBOL"],
+                name=row["NAME OF COMPANY"],
+                series=row["SERIES"],
+                listing_date=listing_date,
+            )
+        )
+    if not rows:
+        raise NseFormatError("EQUITY_L.csv is empty")
+    return rows
 
 
 def parse_trading_holidays(
