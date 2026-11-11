@@ -1,0 +1,18 @@
+{
+  "isin": "INE002A01018",
+  "symbol": "RELIANCE",
+  "adjustments": [
+    {
+      "ex_date": "2017-09-19",
+      "action_type": "BONUS",
+      "details": "Bonus 1:1",
+      "adj_factor": 0.5
+    },
+    {
+      "ex_date": "2020-05-22",
+      "action_type": "SPLIT",
+      "details": "Split 1:1 (2 for 1)",
+      "adj_factor": 0.5
+    }
+  ]
+}

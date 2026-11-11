@@ -1,0 +1,18 @@
+{
+  "isin": "INE009A01021",
+  "symbol": "INFY",
+  "adjustments": [
+    {
+      "ex_date": "2018-06-18",
+      "action_type": "BONUS",
+      "details": "Bonus 1:1",
+      "adj_factor": 0.5
+    },
+    {
+      "ex_date": "2000-02-14",
+      "action_type": "SPLIT",
+      "details": "Face value split 10 to 2",
+      "adj_factor": 0.2
+    }
+  ]
+}

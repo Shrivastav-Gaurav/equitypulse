@@ -1,0 +1,18 @@
+{
+  "isin": "INE154A01025",
+  "symbol": "ITC",
+  "adjustments": [
+    {
+      "ex_date": "2016-07-25",
+      "action_type": "BONUS",
+      "details": "Bonus 1:2",
+      "adj_factor": 0.6666666666666666
+    },
+    {
+      "ex_date": "2010-07-05",
+      "action_type": "RIGHTS",
+      "details": "Rights issue 1:5",
+      "adj_factor": null
+    }
+  ]
+}
