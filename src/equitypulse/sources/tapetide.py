@@ -2,9 +2,8 @@
 
 Every call path:
   1. Check the DB cache (snapshots); return cached payload if present for the same as_of.
-  2. Check the daily budget (api_usage); refuse if exhausted.
+  2. Check the daily budget (api_usage), count the attempt and commit it; refuse if exhausted.
   3. Call the MCP tool (async, run via asyncio.run); store the raw payload in snapshots.
-  4. Increment api_usage.calls for today.
 
 All Tapetide calls go through `call_tool()` — never call the MCP session directly from
 other modules.
@@ -74,6 +73,20 @@ def _record_call(session: Session, now: dt.datetime | None = None) -> None:
     usage.calls += 1
 
 
+def _reserve_call(
+    session: Session, now: dt.datetime | None = None, budget: int | None = None
+) -> None:
+    """Check the budget, count one attempt, and COMMIT before the request is sent.
+
+    Committing here means a later rollback by the caller can never erase the count. SQLite
+    allows one writer, so the count cannot use a separate connection while the caller holds
+    pending writes; the caller's pending work is committed together with the count instead.
+    """
+    _check_budget(session, now, budget=budget)
+    _record_call(session, now)
+    session.commit()
+
+
 # ── cache lookup ──────────────────────────────────────────────────────────────
 
 
@@ -106,19 +119,19 @@ def _cached_payload(
 async def _call_mcp_tool(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Open a one-shot MCP session, call `tool`, and return the parsed JSON payload."""
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamable_http_client
+    from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
     settings = get_settings()
     url = settings.tapetide_mcp_url
     token = settings.tapetide_api_token.get_secret_value()
 
-    async with streamable_http_client(
-        url, headers={"Authorization": f"Bearer {token}"}
-    ) as (read, write):
+    http_client = create_mcp_http_client(headers={"Authorization": f"Bearer {token}"})
+    async with http_client, streamable_http_client(url, http_client=http_client) as streams:
+        read, write = streams[0], streams[1]
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool, arguments)
-            if result.isError:
+            if result.is_error:
                 raise TapetideError(f"Tapetide tool {tool!r} returned an error: {result.content}")
             # MCP returns a list of content blocks; we expect one text block with JSON.
             if not result.content:
@@ -143,6 +156,17 @@ async def _call_mcp_tool(tool: str, arguments: dict[str, Any]) -> dict[str, Any]
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 1.0
 
+# The mcp package ships its own copy of httpx ("httpx2"), so its errors are not httpx's.
+_HTTP_MODULES: tuple[Any, ...] = (httpx,)
+try:
+    import httpx2
+
+    _HTTP_MODULES = (httpx, httpx2)
+except ImportError:  # pragma: no cover
+    pass
+_STATUS_ERRORS = tuple(m.HTTPStatusError for m in _HTTP_MODULES)
+_TRANSIENT = (*(m.TransportError for m in _HTTP_MODULES), TimeoutError, ConnectionError)
+
 
 def _leaves(exc: BaseException) -> list[BaseException]:
     """Flatten exception groups: anyio task groups wrap the real error."""
@@ -155,10 +179,10 @@ def _is_retryable(exc: BaseException) -> bool:
     """Network errors and 5xx are transient. Any 4xx (bad request, auth, rate limit) or a
     tool-level error is not: retrying would burn budget for the same answer."""
     for leaf in _leaves(exc):
-        if isinstance(leaf, httpx.HTTPStatusError):
+        if isinstance(leaf, _STATUS_ERRORS):
             if leaf.response.status_code < 500:
                 return False
-        elif not isinstance(leaf, httpx.TransportError | TimeoutError | ConnectionError):
+        elif not isinstance(leaf, _TRANSIENT):
             return False
     return True
 
@@ -184,8 +208,9 @@ def call_tool(
     - `as_of`: the date the data is valid for; defaults to today_ist().
     - `_mcp_caller`: callable (tool, args) → dict, injectable for testing.
 
-    Every attempt, including retries and failures, counts against the daily budget.
-    Does not commit; the caller owns the transaction.
+    Every attempt, including retries and failures, counts against the daily budget and is
+    committed before the request is sent (this also commits the caller's pending work). The
+    snapshot of the response is flushed, not committed: the caller commits it.
     """
     if _budget is not None and _mcp_caller is None:
         raise ValueError("_budget override is only allowed together with an injected _mcp_caller")
@@ -200,9 +225,7 @@ def call_tool(
     caller = _mcp_caller or (lambda t, a: asyncio.run(_call_mcp_tool(t, a)))
     payload: dict[str, Any] = {}
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        _check_budget(session, now, budget=_budget)
-        _record_call(session, now)
-        session.flush()
+        _reserve_call(session, now, budget=_budget)
         try:
             payload = caller(tool, arguments)
             break
@@ -234,10 +257,78 @@ def search_stocks(
     return call_tool(session, "search_stocks", {"query": query}, entity=query, as_of=as_of, **kw)
 
 
+MAX_HISTORY_DAYS = 2000
+
+
 def get_price_history(
-    session: Session, isin: str, *, as_of: dt.date | None = None, **kw: Any
+    session: Session,
+    symbol: str,
+    *,
+    days: int,
+    end_date: dt.date | None = None,
+    interval: str = "daily",
+    as_of: dt.date | None = None,
+    **kw: Any,
 ) -> dict[str, Any]:
-    return call_tool(session, "get_price_history", {"isin": isin}, entity=isin, as_of=as_of, **kw)
+    """One page of `get_price_history` (NSE `symbol`, not ISIN; `days` are calendar days).
+
+    `close` in the response is split/bonus-adjusted; `raw_close` is the raw print.
+    """
+    if not 1 <= days <= MAX_HISTORY_DAYS:
+        raise ValueError(f"days must be 1..{MAX_HISTORY_DAYS}, got {days}")
+    arguments: dict[str, Any] = {"symbol": symbol, "days": days, "interval": interval}
+    end = end_date.isoformat() if end_date else ""
+    if end_date is not None:
+        arguments["end_date"] = end
+    return call_tool(
+        session,
+        "get_price_history",
+        arguments,
+        entity=f"{symbol}:{interval}:{days}:{end}",
+        as_of=as_of or end_date,
+        **kw,
+    )
+
+
+def fetch_price_history(
+    session: Session,
+    symbol: str,
+    *,
+    days: int,
+    end_date: dt.date | None = None,
+    interval: str = "daily",
+    max_pages: int = 10,
+    **kw: Any,
+) -> list[dict[str, Any]]:
+    """All bars for `days`, newest page first, paging back while `meta.window.truncated`.
+
+    Each page is one budgeted call. Rows are de-duplicated by date and sorted ascending.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    remaining, cursor = days, end_date
+    for _ in range(max_pages):
+        payload = get_price_history(
+            session, symbol, days=min(remaining, MAX_HISTORY_DAYS), end_date=cursor,
+            interval=interval, **kw,
+        )
+        for row in payload.get("data") or []:
+            rows[str(row["date"])] = row
+        window = (payload.get("meta") or {}).get("window") or {}
+        if not window.get("truncated"):
+            break
+        remaining -= int(window.get("served_days") or 0)
+        next_cursor = window.get("next_cursor")
+        if remaining <= 0 or not next_cursor:
+            break
+        new_cursor = dt.date.fromisoformat(str(next_cursor))
+        if cursor is not None and new_cursor >= cursor:
+            raise TapetideError(f"get_price_history cursor did not move back: {next_cursor}")
+        cursor = new_cursor
+    else:
+        raise TapetideError(
+            f"get_price_history for {symbol} still truncated after {max_pages} pages"
+        )
+    return [rows[k] for k in sorted(rows)]
 
 
 def get_company_profile(

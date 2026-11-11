@@ -27,6 +27,27 @@ SOURCE = "NSE_EQUITY_L"
 _TRUNCATION_THRESHOLD = 0.90  # refuse if incoming < 90% of currently-active rows
 
 
+def symbol_as_of(session: Session, isin: str, date: dt.date) -> str | None:
+    """The NSE symbol `isin` traded under on `date` (symbols change; ISINs rarely do).
+
+    Uses symbol_history; falls back to the current symbol when no history row covers `date`.
+    """
+    hist = session.scalar(
+        select(SymbolHistory.symbol)
+        .where(
+            SymbolHistory.isin == isin,
+            SymbolHistory.valid_from <= date,
+            (SymbolHistory.valid_to.is_(None)) | (SymbolHistory.valid_to >= date),
+        )
+        .order_by(SymbolHistory.valid_from.desc())
+        .limit(1)
+    )
+    if hist is not None:
+        return hist
+    sec = session.get(Security, isin)
+    return sec.symbol if sec is not None else None
+
+
 class LoadResult(BaseModel):
     inserted: int = 0
     updated: int = 0
