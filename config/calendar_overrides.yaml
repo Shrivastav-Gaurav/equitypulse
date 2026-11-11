@@ -1,0 +1,31 @@
+# NSE equity trading-calendar overrides. These WIN over NSE's holiday list.
+#
+# Use for: Muhurat trading, weekend special sessions (e.g. Union Budget day), and unexpected
+# closures NSE announces by circular. One entry per date:
+#   - date: YYYY-MM-DD
+#     trading: true | false
+#     note: why (cite the NSE circular if there is one)
+#
+# Every `trading: true` entry below was verified by NSE having published a full bhavcopy
+# (sec_bhavdata_full_DDMMYYYY.csv) whose rows carry that date. Check the same way before adding.
+# After editing, re-run the calendar refresh for the affected year.
+
+overrides:
+  - date: 2024-01-20
+    trading: true
+    note: Special trading session (Saturday); not in NSE's holiday list
+  - date: 2024-05-18
+    trading: true
+    note: Special live trading session (Saturday); not in NSE's holiday list
+  - date: 2025-02-01
+    trading: true
+    note: Union Budget - special live trading session (Saturday)
+  - date: 2025-10-21
+    trading: true
+    note: Muhurat trading, Diwali Laxmi Pujan (NSE lists the day as a holiday)
+  - date: 2026-02-01
+    trading: true
+    note: Union Budget - special live trading session (Sunday)
+  - date: 2026-11-08
+    trading: true
+    note: Muhurat trading, Diwali Laxmi Pujan (Sunday)
