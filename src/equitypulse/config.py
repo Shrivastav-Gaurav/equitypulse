@@ -29,8 +29,8 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Database (SQLite now; PostgreSQL later; a Postgres URL may carry a password).
-    database_url: str = "sqlite:///data/private/equitypulse.db"
+    # Database (SQLite now; PostgreSQL later). Secret because a Postgres URL carries a password.
+    database_url: SecretStr = SecretStr("sqlite:///data/private/equitypulse.db")
 
     # Tapetide MCP: required, because Phase 0 ingestion depends on it.
     tapetide_mcp_url: str = "https://mcp.tapetide.com/mcp"

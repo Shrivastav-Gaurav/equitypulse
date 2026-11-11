@@ -68,7 +68,7 @@ def test_reads_values_from_env_file(tmp_path: Path) -> None:
 
 def test_defaults_match_env_example(tmp_path: Path) -> None:
     s = load_settings(env_file=write_env(tmp_path, f"TAPETIDE_API_TOKEN={FAKE_TOKEN}\n"))
-    assert s.database_url == "sqlite:///data/private/equitypulse.db"
+    assert s.database_url.get_secret_value() == "sqlite:///data/private/equitypulse.db"
     assert s.tapetide_mcp_url == "https://mcp.tapetide.com/mcp"
     assert s.tapetide_daily_budget == 45
     assert s.langsmith_project == "equitypulse"
@@ -85,6 +85,7 @@ def test_environment_variable_overrides_env_file(
 
 def test_every_secret_field_is_secretstr() -> None:
     secret_fields = {
+        "database_url",
         "tapetide_api_token",
         "openrouter_api_key",
         "langsmith_api_key",
@@ -155,6 +156,19 @@ def test_repr_str_and_json_hide_secrets(tmp_path: Path) -> None:
         for secret in (FAKE_TOKEN, FAKE_OPENROUTER, FAKE_LANGSMITH, FAKE_GMAIL_PW):
             assert secret not in text
     assert "**********" in repr(s)
+
+
+def test_database_url_password_is_hidden(tmp_path: Path) -> None:
+    pg_password = "pg-secret-pw-987"
+    env = write_env(
+        tmp_path,
+        f"TAPETIDE_API_TOKEN={FAKE_TOKEN}\n"
+        f"DATABASE_URL=postgresql+psycopg://ep:{pg_password}@localhost:5432/equitypulse\n",
+    )
+    s = load_settings(env_file=env)
+    assert pg_password in s.database_url.get_secret_value()
+    for text in (repr(s), str(s), s.model_dump_json(), str(s.model_dump())):
+        assert pg_password not in text
 
 
 def test_secrets_are_secretstr_instances(tmp_path: Path) -> None:
