@@ -86,6 +86,28 @@ def backfill(
 
 
 @app.command()
+def nightly(
+    date: dt.date = typer.Option(  # noqa: B008
+        None, "--date", formats=["%Y-%m-%d"], help="Market date to run for (default: today IST)"
+    ),
+) -> None:
+    """Run nightly ingest: calendar check → master → bhavcopy → surveillance."""
+    from equitypulse.db.session import session_factory
+    from equitypulse.jobs.nightly import run_nightly
+
+    with session_factory()() as session:
+        result = run_nightly(session, date=date)
+        session.commit()
+
+    if result.skipped:
+        typer.echo(f"Skipped {result.date}: not a trading day.")
+        return
+    typer.echo(f"Nightly {result.date}: master +{result.master_rows}, "
+               f"prices +{result.bhavcopy_rows}, surveillance +{result.surveillance_rows}"
+               + (" [DEGRADED]" if result.degraded else ""))
+
+
+@app.command()
 def status() -> None:
     """Show freshness per source and Tapetide calls used today."""
     from equitypulse.audit import status_summary
