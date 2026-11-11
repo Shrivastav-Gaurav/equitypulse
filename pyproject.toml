@@ -1,0 +1,41 @@
+[project]
+name = "equitypulse"
+version = "0.1.0"
+description = "Personal Indian-equity trade planner (see CLAUDE.md)"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "httpx>=0.27",
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "mcp>=1.2",
+    "rapidfuzz>=3.6",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+]
+
+[project.scripts]
+ep = "equitypulse.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.5", "respx>=0.21"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/equitypulse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

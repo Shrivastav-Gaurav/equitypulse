@@ -1,0 +1,25 @@
+# secrets and personal data
+.env
+.env.*
+!.env.example
+data/private/*
+!data/private/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# editors / OS
+.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
