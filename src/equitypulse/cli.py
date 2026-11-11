@@ -42,47 +42,53 @@ def backfill(
     to_date: dt.date = typer.Option(  # noqa: B008
         ..., "--to", formats=["%Y-%m-%d"], help="End date (inclusive)"
     ),
+    universe: str = typer.Option(  # noqa: B008
+        None, "--universe", help="Only load current members of this index, e.g. NIFTY500"
+    ),
 ) -> None:
     """Download and store daily bhavcopy for a date range.
 
-    Skips non-trading days. Rate-limited to avoid hammering NSE.
-    Run the equity master first so ISINs resolve cleanly.
+    Skips non-trading days and dates already loaded; never uses the Tapetide fallback;
+    stops if NSE refuses three dates in a row. One audit run is written per date.
+    Run the calendar, equity master and (for --universe) index membership first.
     """
-    import time
-
     from equitypulse.calendar import NseCalendar
     from equitypulse.config import get_settings
     from equitypulse.db.session import session_factory
-    from equitypulse.prices import load_bhavcopy
+    from equitypulse.index_load import open_members
+    from equitypulse.jobs.backfill import run_backfill
 
-    settings = get_settings()
-    delay = settings.nse_request_delay_seconds
+    delay = get_settings().nse_request_delay_seconds
 
     with session_factory()() as session:
         try:
             cal = NseCalendar.from_session(session)
         except Exception:
-            typer.echo(
-                "Calendar not loaded. Run `ep nightly` or refresh the calendar first.",
-                err=True,
-            )
+            typer.echo("Calendar not loaded: refresh the trading calendar first.", err=True)
             raise typer.Exit(1) from None
 
-        date = from_date
-        while date <= to_date:
-            if cal.is_trading_day(date):
-                typer.echo(f"  {date} … ", nl=False)
-                try:
-                    result = load_bhavcopy(session, date)
-                    session.commit()
-                    typer.echo(f"+{result.inserted} rows")
-                except Exception as exc:
-                    session.rollback()
-                    typer.echo(f"FAILED: {exc}", err=True)
-                time.sleep(delay)
-            else:
-                typer.echo(f"  {date} skip (not a trading day)")
-            date += dt.timedelta(days=1)
+        members = None
+        if universe:
+            members = open_members(session, universe)
+            if not members:
+                typer.echo(f"No members loaded for index {universe}.", err=True)
+                raise typer.Exit(1)
+            typer.echo(f"Universe {universe}: {len(members)} ISINs")
+
+        result = run_backfill(
+            session, cal, from_date, to_date, universe=members, delay_seconds=delay,
+            progress=lambda msg: typer.echo(f"  {msg}"),
+        )
+
+    typer.echo(
+        f"Backfill: loaded {result.loaded} dates ({result.rows_written} rows), "
+        f"already loaded {result.already_loaded}, failed {len(result.failed)}"
+    )
+    if result.blocked:
+        typer.echo("STOPPED: NSE refused repeated downloads; it may be blocking us.", err=True)
+        raise typer.Exit(2)
+    if result.failed:
+        raise typer.Exit(1)
 
 
 @app.command()

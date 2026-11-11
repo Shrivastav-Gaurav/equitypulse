@@ -106,3 +106,14 @@ def load_index_membership(
 
     session.flush()
     return result
+
+
+def open_members(session: Session, index_name: str) -> set[str]:
+    """ISINs currently in `index_name` (open membership rows)."""
+    return set(
+        session.scalars(
+            select(IndexMembership.isin).where(
+                IndexMembership.index_name == index_name, IndexMembership.date_to.is_(None)
+            )
+        )
+    )

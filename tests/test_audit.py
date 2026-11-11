@@ -135,3 +135,13 @@ def test_status_summary_includes_finished_jobs(db_session: Session) -> None:
     rows = status_summary(db_session)
     sources = [r["source"] for r in rows]
     assert "NSE_BHAVCOPY" in sources
+
+
+def test_final_row_inherits_as_of_and_started_at(db_session: Session) -> None:
+    started_at = dt.datetime(2026, 11, 11, 5, 0, tzinfo=dt.UTC)
+    begin_audit(db_session, run_id=_RUN_ID, job="prices", source="NSE_BHAVCOPY", as_of=DATE, now=started_at)
+    finish_audit(db_session, run_id=_RUN_ID, job="prices", source="NSE_BHAVCOPY", status="OK", now=_NOW)
+    final = db_session.scalar(select(DataAudit).where(DataAudit.status == "OK"))
+    assert final.as_of == DATE
+    assert final.started_at.replace(tzinfo=None) == started_at.replace(tzinfo=None)
+    assert final.finished_at.replace(tzinfo=None) == _NOW.replace(tzinfo=None)

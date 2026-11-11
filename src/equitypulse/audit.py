@@ -20,6 +20,7 @@ import uuid
 from types import TracebackType
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from equitypulse.db.models import DataAudit
@@ -71,13 +72,25 @@ def finish_audit(
     error: str | None = None,
     now: dt.datetime | None = None,
 ) -> DataAudit:
-    """Write a final OK/DEGRADED/FAILED row. Does not commit."""
+    """Write a final OK/DEGRADED/FAILED row. Does not commit.
+
+    The row inherits `started_at` and `as_of` from the run's STARTED row, so the final row
+    alone says which market date it was for and how long the run took.
+    """
+    started = session.scalar(
+        select(DataAudit).where(
+            DataAudit.run_id == run_id,
+            DataAudit.job == job,
+            DataAudit.source == source,
+            DataAudit.status == "STARTED",
+        )
+    )
     row = DataAudit(
         run_id=run_id,
         job=job,
         source=source,
-        as_of=None,
-        started_at=_utcnow(now),
+        as_of=started.as_of if started is not None else None,
+        started_at=started.started_at if started is not None else _utcnow(now),
         finished_at=_utcnow(now),
         status=status,
         rows_in=rows_in,
