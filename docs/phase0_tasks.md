@@ -10,7 +10,7 @@ Review the diff, then commit with message `T<n>: <title>` and push. Tick the box
 
 | Done | Task | Model | Acceptance check |
 | --- | --- | --- | --- |
-| [ ] | **T1 Project skeleton.** uv project, src layout, ruff + pytest config, `cli.py` with an `ep` entry point that prints the version | Sonnet | `uv run ep --version` works; CI not yet |
+| [x] | **T1 Project skeleton.** uv project, src layout, ruff + pytest config, `cli.py` with an `ep` entry point that prints the version | Sonnet | `uv run ep --version` works; CI not yet |
 | [ ] | **T2 Settings and secrets.** `config.py` with pydantic-settings reading `.env`; `.env.example` complete; keys never logged | Sonnet | Test proves missing required key raises a clear error; `repr(settings)` hides secrets |
 | [ ] | **T3 Database and migrations.** SQLAlchemy models for every table in the spec; SQLite WAL; Alembic initial migration | **Opus** (design + review) | `alembic upgrade head` creates all tables; a test round-trips one row per table |
 | [ ] | **T4 Trading calendar.** NSE holidays + weekends, YAML override, helpers `is_trading_day`, `prev_trading_day`, `add_trading_days` | Sonnet | Tests on known holidays and long weekends |
