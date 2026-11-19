@@ -148,7 +148,11 @@ def load_equity_master(
                         open_hist.symbol = row.symbol
                         open_hist.source = SOURCE
                     else:
-                        open_hist.valid_to = as_of - dt.timedelta(days=1)
+                        # Clamp: a back-dated as_of must never produce
+                        # valid_to < valid_from (violates the CHECK constraint).
+                        open_hist.valid_to = max(
+                            as_of - dt.timedelta(days=1), open_hist.valid_from
+                        )
                         session.add(
                             SymbolHistory(
                                 isin=isin,

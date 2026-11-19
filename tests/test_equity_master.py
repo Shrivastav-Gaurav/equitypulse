@@ -192,7 +192,7 @@ def test_load_is_idempotent(db_session: Session) -> None:
 
 def test_load_updates_symbol_on_rename(db_session: Session) -> None:
     # First load: RELIANCE is active.
-    load_equity_master(db_session, fetch=_fetch_fixture)
+    load_equity_master(db_session, fetch=_fetch_fixture, as_of=dt.date(2026, 11, 1))
     db_session.commit()
 
     # Second load with RELIANCE renamed to RELIANCE2.
