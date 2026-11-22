@@ -87,8 +87,8 @@ def test_parse_udiff_rejects_bad_date() -> None:
 
 def test_parse_delivery_returns_symbol_keyed_dict() -> None:
     deliv = parse_bhavcopy_delivery(DELIVERY_CSV)
-    assert "RELIANCE" in deliv
-    r = deliv["RELIANCE"]
+    assert ("RELIANCE", "EQ") in deliv
+    r = deliv[("RELIANCE", "EQ")]
     assert 0 < r.delivery_pct < 1  # stored as fraction
     assert r.delivery_qty is not None and r.delivery_qty > 0
 
@@ -100,7 +100,7 @@ def test_parse_delivery_handles_dash_as_null() -> None:
         "IDEA,EQ,11-Nov-2026,10.00,10.50,11.00,10.00,10.50,10.50,10.75,100000,100.00,5000,-,-\n"
     )
     deliv = parse_bhavcopy_delivery(csv_with_dash)
-    r = deliv["IDEA"]
+    r = deliv[("IDEA", "EQ")]
     assert r.delivery_qty is None
     assert r.delivery_pct is None
 
@@ -267,3 +267,85 @@ def test_load_bhavcopy_golden_check(db_session: Session) -> None:
     assert len(udiff_rows) == 1
     assert row.close == pytest.approx(udiff_rows[0].close, abs=0.01)
     assert row.volume == udiff_rows[0].volume
+
+
+# ── non-EQ series (BE/BZ trade-for-trade) ─────────────────────────────────────
+
+
+
+def _udiff_with(extra_rows: list[str]) -> str:
+    lines = UDIFF_CSV.strip().splitlines()
+    header_idx = next(i for i, ln in enumerate(lines) if "TradDt" in ln)
+    return "\n".join(lines[: header_idx + 1] + extra_rows) + "\n"
+
+
+def _row_like(isin: str, symbol: str, series: str, close: str) -> str:
+    """A UDiFF row copied from the fixture's RELIANCE row with fields swapped."""
+    lines = UDIFF_CSV.strip().splitlines()
+    header_idx = next(i for i, ln in enumerate(lines) if "TradDt" in ln)
+    header = [h.strip().lstrip("﻿") for h in lines[header_idx].split(",")]
+    base = next(ln for ln in lines[header_idx + 1 :] if "INE002A01018" in ln).split(",")
+    row = dict(zip(header, base, strict=True))
+    row.update({"ISIN": isin, "TckrSymb": symbol, "SctySrs": series, "ClsPric": close})
+    return ",".join(row[h] for h in header)
+
+
+def test_parse_udiff_keeps_be_and_bz_rows_with_their_series() -> None:
+    text = _udiff_with([
+        _row_like("INE0TTL01011", "TTML", "BE", "66.09"),
+        _row_like("INE0BZZ01011", "BZSTK", "BZ", "12.00"),
+        _row_like("INE0SME01011", "SMESTK", "SM", "40.00"),
+        _row_like("INE0GSB01011", "GSEC", "GB", "100.00"),
+    ])
+    got = {r.symbol: r.series for r in parse_bhavcopy_udiff(text)}
+    assert got == {"TTML": "BE", "BZSTK": "BZ"}  # SME and other segments still dropped
+
+
+def test_parse_udiff_prefers_eq_when_an_isin_is_in_two_series() -> None:
+    text = _udiff_with([
+        _row_like("INE002A01018", "RELIANCE", "BE", "1.00"),
+        _row_like("INE002A01018", "RELIANCE", "EQ", "2.00"),
+    ])
+    rows = parse_bhavcopy_udiff(text)
+    assert [(r.series, r.close) for r in rows] == [("EQ", 2.0)]
+    text_eq_first = _udiff_with([
+        _row_like("INE002A01018", "RELIANCE", "EQ", "2.00"),
+        _row_like("INE002A01018", "RELIANCE", "BE", "1.00"),
+    ])
+    assert [(r.series, r.close) for r in parse_bhavcopy_udiff(text_eq_first)] == [("EQ", 2.0)]
+
+
+def test_parse_delivery_keys_by_symbol_and_series() -> None:
+    text = (
+        "SYMBOL,SERIES,DATE1,PREV_CLOSE,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,LAST_PRICE,CLOSE_PRICE,"
+        "AVG_PRICE,TTL_TRD_QNTY,TURNOVER_LACS,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
+        "TTML, BE, 01-Jul-2025,65,66,67,64,66,66.09,66,1000,1,10,1000,100.00\n"
+        "SMESTK, SM, 01-Jul-2025,40,40,40,40,40,40,40,100,1,1,100,100.00\n"
+    )
+    deliv = parse_bhavcopy_delivery(text)
+    assert set(deliv) == {("TTML", "BE")}
+    assert deliv[("TTML", "BE")].delivery_pct == pytest.approx(1.0)
+
+
+def test_load_stores_be_row_with_series_and_its_delivery(db_session: Session) -> None:
+    udiff = _udiff_with([_row_like("INE0TTL01011", "TTML", "BE", "66.09")])
+    delivery = (
+        "SYMBOL,SERIES,DATE1,PREV_CLOSE,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,LAST_PRICE,CLOSE_PRICE,"
+        "AVG_PRICE,TTL_TRD_QNTY,TURNOVER_LACS,NO_OF_TRADES,DELIV_QTY,DELIV_PER\n"
+        "TTML,EQ,11-Nov-2026,65,66,67,64,66,66.09,66,1000,1,10,1,1.00\n"
+        "TTML,BE,11-Nov-2026,65,66,67,64,66,66.09,66,1000,1,10,1000,100.00\n"
+    )
+    load_bhavcopy(db_session, DATE, fetch_udiff=lambda _d: udiff, fetch_delivery=lambda _d: delivery)
+    row = db_session.get(PriceDaily, ("INE0TTL01011", DATE))
+    assert row.series == "BE"
+    assert row.delivery_pct == pytest.approx(1.0)  # the BE delivery row, not the EQ one
+
+
+def test_reload_updates_series_when_a_stock_moves_segment(db_session: Session) -> None:
+    eq = _udiff_with([_row_like("INE0TTL01011", "TTML", "EQ", "66.09")])
+    be = _udiff_with([_row_like("INE0TTL01011", "TTML", "BE", "66.09")])
+    kw = dict(fetch_delivery=lambda _d: DELIVERY_CSV)
+    load_bhavcopy(db_session, DATE, fetch_udiff=lambda _d: eq, **kw)
+    result = load_bhavcopy(db_session, DATE, fetch_udiff=lambda _d: be, **kw)
+    assert result.updated == 1
+    assert db_session.get(PriceDaily, ("INE0TTL01011", DATE)).series == "BE"

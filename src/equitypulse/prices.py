@@ -220,7 +220,7 @@ def load_bhavcopy(
             source=SOURCE_NSE,
             as_of=as_of,
         )
-        deliv = delivery.get(urow.symbol)
+        deliv = delivery.get((urow.symbol, urow.series))
         if urow.isin in existing:
             price_row = session.get(PriceDaily, (urow.isin, date))
             if price_row is None:
@@ -229,9 +229,11 @@ def load_bhavcopy(
                 price_row.close != urow.close
                 or price_row.volume != urow.volume
                 or price_row.source != SOURCE_NSE
+                or price_row.series != urow.series
             )
             if changed:
                 price_row.source = SOURCE_NSE
+                price_row.series = urow.series
                 price_row.open = urow.open
                 price_row.high = urow.high
                 price_row.low = urow.low

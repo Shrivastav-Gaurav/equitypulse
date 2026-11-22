@@ -45,6 +45,9 @@ def backfill(
     universe: str = typer.Option(  # noqa: B008
         None, "--universe", help="Only load current members of this index, e.g. NIFTY500"
     ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Re-download dates already loaded (upsert; unchanged rows skip)"
+    ),
 ) -> None:
     """Download and store daily bhavcopy for a date range.
 
@@ -77,7 +80,7 @@ def backfill(
 
         result = run_backfill(
             session, cal, from_date, to_date, universe=members, delay_seconds=delay,
-            progress=lambda msg: typer.echo(f"  {msg}"),
+            refresh=refresh, progress=lambda msg: typer.echo(f"  {msg}"),
         )
 
     typer.echo(

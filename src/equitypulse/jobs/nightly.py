@@ -17,8 +17,10 @@ from sqlalchemy.orm import Session
 
 from equitypulse.audit import AuditContext, new_run_id
 from equitypulse.calendar import NseCalendar, today_ist
+from equitypulse.master import SOURCE as MASTER_SOURCE
 from equitypulse.master import load_equity_master
 from equitypulse.prices import load_bhavcopy
+from equitypulse.sources.surveillance import SOURCE as SURVEILLANCE_SOURCE
 from equitypulse.surveillance_load import load_surveillance
 
 
@@ -58,7 +60,7 @@ def run_nightly(
 
     # ── equity master ────────────────────────────────────────────────────────
     with AuditContext(
-        session, run_id=run_id, job="equity_master", source="NSE_EQUITY", as_of=date, now=now
+        session, run_id=run_id, job="equity_master", source=MASTER_SOURCE, as_of=date, now=now
     ) as ctx:
         master_fn = fetch_master if fetch_master is not None else load_equity_master
         master_result = master_fn(session, as_of=date, now=now)
@@ -85,7 +87,7 @@ def run_nightly(
     for list_type in ("ASM", "GSM", "ESM"):
         with AuditContext(
             session, run_id=run_id, job=f"surveillance_{list_type.lower()}",
-            source=f"NSE_{list_type}", as_of=date, now=now,
+            source=SURVEILLANCE_SOURCE, as_of=date, now=now,
         ) as ctx:
             surv_result = surv_fn(session, list_type, as_of=date, now=now)
             inserted = getattr(surv_result, "inserted", 0)

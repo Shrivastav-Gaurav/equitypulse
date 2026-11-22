@@ -226,7 +226,12 @@ def parse_trading_holidays(
 # Two files are needed per trading day because NSE splits the data:
 #   UDiFF format  — has ISIN + all prices; no delivery data.
 #   sec_bhavdata_full — has SYMBOL + delivery %; no ISIN.
-# The loader joins them on SYMBOL (after filtering for the EQ series).
+# The loader joins them on (SYMBOL, SERIES).
+#
+# Rows are kept for PRICE_SERIES, not only EQ: NSE moves stocks into BE/BZ (trade-for-trade)
+# for weeks at a time, and dropping those rows leaves holes in their price history. The scan's
+# hard filter excludes BE/BZ stocks by the stored `series`, so keeping the rows loosens nothing.
+PRICE_SERIES = frozenset({"EQ", "BE", "BZ"})
 
 
 def BHAVCOPY_UDIFF_URL(date: dt.date) -> str:  # noqa: N802
@@ -242,7 +247,7 @@ def BHAVCOPY_DELIVERY_URL(date: dt.date) -> str:  # noqa: N802
 
 
 class UDiffRow(BaseModel):
-    """One EQ row from the UDiFF bhavcopy CSV."""
+    """One PRICE_SERIES row from the UDiFF bhavcopy CSV."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -260,11 +265,12 @@ class UDiffRow(BaseModel):
 
 
 class DeliveryRow(BaseModel):
-    """Delivery data from sec_bhavdata_full for one stock."""
+    """Delivery data from sec_bhavdata_full for one stock in one series."""
 
     model_config = ConfigDict(frozen=True)
 
     symbol: str
+    series: str
     delivery_qty: int | None
     delivery_pct: float | None  # stored as fraction 0..1
 
@@ -356,7 +362,11 @@ def fetch_bhavcopy_delivery(
 
 
 def parse_bhavcopy_udiff(text: str) -> list[UDiffRow]:
-    """Parse UDiFF CSV; return only EQ-series rows. Raises NseFormatError on bad data."""
+    """Parse UDiFF CSV; return PRICE_SERIES rows. Raises NseFormatError on bad data.
+
+    One row per ISIN: a duplicate within a series is an error; if an ISIN appears in two
+    series on one day, the EQ row wins.
+    """
     text = text.strip().lstrip("﻿")  # strip BOM if present
     if not text:
         raise NseFormatError("UDiFF bhavcopy CSV is empty")
@@ -370,18 +380,21 @@ def parse_bhavcopy_udiff(text: str) -> list[UDiffRow]:
     if missing:
         raise NseFormatError(f"UDiFF bhavcopy missing columns: {missing}")
 
-    rows: list[UDiffRow] = []
-    seen: set[str] = set()
+    by_isin: dict[str, UDiffRow] = {}
     for raw in reader:
         row = {k.strip(): v.strip() for k, v in raw.items()}
-        if row.get("SctySrs") != "EQ":
+        series = row.get("SctySrs", "")
+        if series not in PRICE_SERIES:
             continue
         isin = row.get("ISIN", "")
         if not _ISIN_RE.match(isin):
             raise NseFormatError(f"UDiFF bhavcopy invalid ISIN: {isin!r}")
-        if isin in seen:
-            raise NseFormatError(f"UDiFF bhavcopy duplicate ISIN: {isin}")
-        seen.add(isin)
+        prior = by_isin.get(isin)
+        if prior is not None:
+            if prior.series == series:
+                raise NseFormatError(f"UDiFF bhavcopy duplicate ISIN: {isin}")
+            if prior.series == "EQ":
+                continue
         try:
             date = dt.date.fromisoformat(row["TradDt"])
         except ValueError:
@@ -389,7 +402,7 @@ def parse_bhavcopy_udiff(text: str) -> list[UDiffRow]:
         try:
             prev_close = float(row["PrvsClsgPric"]) if row.get("PrvsClsgPric") else None
             traded_value = float(row["TtlTrfVal"]) if row.get("TtlTrfVal") else None
-            rows.append(
+            by_isin[isin] = (
                 UDiffRow(
                     isin=isin,
                     symbol=row["TckrSymb"],
@@ -406,23 +419,24 @@ def parse_bhavcopy_udiff(text: str) -> list[UDiffRow]:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise NseFormatError(f"UDiFF bhavcopy bad row for {isin}: {exc}") from exc
-    if not rows:
+    if not by_isin:
         raise NseFormatError("UDiFF bhavcopy CSV is empty")
-    return rows
+    return list(by_isin.values())
 
 
-def parse_bhavcopy_delivery(text: str) -> dict[str, DeliveryRow]:
-    """Parse sec_bhavdata_full CSV; return dict keyed by SYMBOL for EQ rows."""
+def parse_bhavcopy_delivery(text: str) -> dict[tuple[str, str], DeliveryRow]:
+    """Parse sec_bhavdata_full CSV; return dict keyed by (SYMBOL, SERIES) for PRICE_SERIES."""
     text = text.strip()
     if not text:
         raise NseFormatError("sec_bhavdata_full CSV is empty")
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None:
         raise NseFormatError("sec_bhavdata_full has no headers")
-    result: dict[str, DeliveryRow] = {}
+    result: dict[tuple[str, str], DeliveryRow] = {}
     for raw in reader:
         row = {k.strip(): v.strip() for k, v in raw.items()}
-        if row.get("SERIES") != "EQ":
+        series = row.get("SERIES", "")
+        if series not in PRICE_SERIES:
             continue
         symbol = row.get("SYMBOL", "")
         if not symbol:
@@ -439,7 +453,7 @@ def parse_bhavcopy_delivery(text: str) -> dict[str, DeliveryRow]:
             raise NseFormatError(
                 f"sec_bhavdata_full bad delivery for {symbol}: {exc}"
             ) from exc
-        result[symbol] = DeliveryRow(
-            symbol=symbol, delivery_qty=delivery_qty, delivery_pct=delivery_pct
+        result[(symbol, series)] = DeliveryRow(
+            symbol=symbol, series=series, delivery_qty=delivery_qty, delivery_pct=delivery_pct
         )
     return result

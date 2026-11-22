@@ -44,9 +44,14 @@ def run_backfill(
     delay_seconds: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
     max_consecutive_fetch_failures: int = 3,
+    refresh: bool = False,
     progress: Callable[[str], None] = lambda _msg: None,
 ) -> BackfillResult:
-    """Load every trading day in [from_date, to_date], committing after each date."""
+    """Load every trading day in [from_date, to_date], committing after each date.
+
+    `refresh=True` re-downloads dates already loaded (the load upserts, so unchanged rows
+    write nothing); use it after the loader starts keeping more rows per file.
+    """
     result = BackfillResult()
     consecutive_fetch_failures = 0
     date = from_date
@@ -61,7 +66,7 @@ def run_backfill(
             .where(PriceDaily.date == date, PriceDaily.source == SOURCE_NSE)
             .limit(1)
         )
-        if loaded is not None:
+        if loaded is not None and not refresh:
             result.already_loaded += 1
             date += dt.timedelta(days=1)
             continue

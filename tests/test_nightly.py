@@ -104,3 +104,10 @@ def test_nightly_records_bhavcopy_rows(db_session: Session) -> None:
     result = run_nightly(db_session, date=DATE, now=_NOW, **stubs)
     db_session.commit()
     assert result.bhavcopy_rows == 42
+
+
+def test_nightly_audits_under_the_loaders_source_names(db_session: Session) -> None:
+    _seed_calendar(db_session)
+    run_nightly(db_session, date=DATE, now=_NOW, **_make_stubs())
+    sources = {r.source for r in db_session.scalars(select(DataAudit))}
+    assert sources == {"NSE_EQUITY_L", "NSE_BHAVCOPY", "NSE_REG_IND"}

@@ -114,3 +114,17 @@ def test_delay_is_applied_between_dates(db_session: Session) -> None:
     run_backfill(db_session, CAL, MON, MON + dt.timedelta(days=1), load=_ok_loader([]),
                  delay_seconds=1.5, sleep=slept.append)
     assert slept == [1.5, 1.5]
+
+
+def test_refresh_reloads_dates_already_loaded(db_session: Session) -> None:
+    _seed_security(db_session)
+    run_backfill(db_session, CAL, MON, MON, load=_ok_loader([]))
+    calls: list = []
+
+    def reload(session, date, **kw):
+        calls.append(date)
+        return LoadPricesResult(updated=0)
+
+    result = run_backfill(db_session, CAL, MON, MON, load=reload, refresh=True)
+    assert calls == [MON]
+    assert result.already_loaded == 0 and result.loaded == 1
