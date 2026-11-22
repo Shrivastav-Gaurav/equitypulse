@@ -349,3 +349,24 @@ def test_reload_updates_series_when_a_stock_moves_segment(db_session: Session) -
     result = load_bhavcopy(db_session, DATE, fetch_udiff=lambda _d: be, **kw)
     assert result.updated == 1
     assert db_session.get(PriceDaily, ("INE0TTL01011", DATE)).series == "BE"
+
+
+def test_chain_universe_loads_a_members_pre_change_isin(db_session: Session) -> None:
+    from equitypulse.isin_links import ChainUniverse
+
+    old = "INE002A01000"  # same issuer as RELIANCE's INE002A01018, as before a face-value split
+    udiff = _udiff_with([
+        _row_like(old, "RELIANCE", "EQ", "2900.00"),
+        _row_like("INE999Z01011", "RELIANCE", "EQ", "5.00"),  # recycled symbol, other issuer
+    ])
+    universe = ChainUniverse(
+        isins=frozenset({"INE002A01018"}),
+        issuers_by_symbol={"RELIANCE": frozenset({"E002A"})},
+    )
+    result = load_bhavcopy(
+        db_session, DATE, fetch_udiff=lambda _d: udiff, fetch_delivery=lambda _d: DELIVERY_CSV,
+        universe=universe,
+    )
+    assert result.inserted == 1
+    assert db_session.get(PriceDaily, (old, DATE)) is not None
+    assert db_session.get(PriceDaily, ("INE999Z01011", DATE)) is None

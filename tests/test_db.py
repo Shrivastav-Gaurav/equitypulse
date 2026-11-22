@@ -22,6 +22,7 @@ from equitypulse.db.models import (
     CorporateAction,
     DataAudit,
     IndexMembership,
+    IsinLink,
     NameMap,
     PriceDaily,
     Security,
@@ -40,6 +41,7 @@ IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FETCHED = dt.datetime(2026, 11, 10, 12, 30, tzinfo=dt.UTC)
 D = dt.date(2026, 11, 10)
 ISIN = "INE002A01018"
+ISIN_NEW = "INE002A01026"  # same issuer: what a face-value split would issue
 
 SPEC_TABLES = {
     "securities",
@@ -56,6 +58,7 @@ SPEC_TABLES = {
     "smallcase_events",
     "smallcase_index",
     "name_map",
+    "isin_links",
 }
 
 # The natural key of each table: re-inserting a row with the same key must fail.
@@ -74,6 +77,7 @@ NATURAL_KEYS: dict[str, set[str]] = {
     "smallcase_events": {"smallcase", "date", "raw_name", "action"},
     "smallcase_index": {"smallcase", "date"},
     "name_map": {"raw_name"},
+    "isin_links": {"old_isin", "new_isin"},
 }
 
 # Columns later phases filter by: each must lead an index (or the primary key).
@@ -88,6 +92,7 @@ FILTER_COLUMNS: dict[str, set[str]] = {
     "smallcase_events": {"smallcase", "date", "isin"},
     "smallcase_index": {"smallcase", "date"},
     "name_map": {"isin"},
+    "isin_links": {"old_isin", "new_isin"},
     "symbol_history": {"isin", "symbol"},
     "securities": {"symbol"},
 }
@@ -107,6 +112,14 @@ def sample_rows() -> dict[type[Base], dict[str, Any]]:
             status="ACTIVE",
             source="NSE_EQUITY_L",
             as_of=D,
+            fetched_at=FETCHED,
+        ),
+        IsinLink: dict(
+            old_isin=ISIN,
+            new_isin=ISIN_NEW,
+            effective_date=D,
+            reason="ISIN_CHANGE",
+            source="NSE_BHAVCOPY",
             fetched_at=FETCHED,
         ),
         SymbolHistory: dict(
@@ -241,6 +254,7 @@ def session(engine: Engine) -> Iterator[Session]:
 
 def add_parent_security(session: Session) -> None:
     session.add(Security(**sample_rows()[Security]))
+    session.add(Security(**(sample_rows()[Security] | {"isin": ISIN_NEW})))
     session.commit()
 
 
@@ -285,6 +299,7 @@ def test_sqlite_connections_use_wal_and_foreign_keys(engine: Engine) -> None:
 def test_one_row_round_trips_per_table(session: Session) -> None:
     rows = sample_rows()
     assert {m.__tablename__ for m in rows} == SPEC_TABLES
+    session.add(Security(**(rows[Security] | {"isin": ISIN_NEW})))  # IsinLink's successor
     identities = {}
     for model, values in rows.items():
         obj = model(**values)

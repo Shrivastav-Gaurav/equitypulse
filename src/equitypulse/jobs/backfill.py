@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from equitypulse.audit import AuditContext, begin_audit, finish_audit, new_run_id
 from equitypulse.calendar import NseCalendar
 from equitypulse.db.models import PriceDaily
+from equitypulse.isin_links import ChainUniverse, detect_links
 from equitypulse.prices import SOURCE_NSE, load_bhavcopy
 from equitypulse.sources.nse import NseFetchError
 
@@ -31,6 +32,7 @@ class BackfillResult(BaseModel):
     skipped_non_trading: int = 0
     failed: list[dt.date] = Field(default_factory=list)
     blocked: bool = False
+    isin_links_added: int = 0
 
 
 def run_backfill(
@@ -39,7 +41,7 @@ def run_backfill(
     from_date: dt.date,
     to_date: dt.date,
     *,
-    universe: set[str] | None = None,
+    universe: set[str] | ChainUniverse | None = None,
     load: Callable[..., Any] = load_bhavcopy,
     delay_seconds: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
@@ -102,4 +104,7 @@ def run_backfill(
 
         sleep(delay_seconds)
         date += dt.timedelta(days=1)
+
+    result.isin_links_added = detect_links(session)
+    session.commit()
     return result

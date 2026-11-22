@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from equitypulse.audit import AuditContext, new_run_id
 from equitypulse.calendar import NseCalendar, today_ist
+from equitypulse.isin_links import detect_links
 from equitypulse.master import SOURCE as MASTER_SOURCE
 from equitypulse.master import load_equity_master
 from equitypulse.prices import load_bhavcopy
@@ -30,6 +31,7 @@ class NightlyResult(BaseModel):
     master_rows: int = 0
     bhavcopy_rows: int = 0
     surveillance_rows: int = 0
+    isin_links_added: int = 0
     degraded: bool = False
 
 
@@ -81,6 +83,7 @@ def run_nightly(
         ctx.degraded = degraded
         if degraded:
             result.degraded = True
+        result.isin_links_added = detect_links(session)
 
     # ── surveillance ─────────────────────────────────────────────────────────
     surv_fn = fetch_surveillance if fetch_surveillance is not None else load_surveillance

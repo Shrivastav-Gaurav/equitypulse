@@ -100,6 +100,24 @@ class SymbolHistory(Base):
     fetched_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
 
 
+class IsinLink(Base):
+    """`old_isin` was replaced by `new_isin` for the same security from `effective_date`.
+
+    NSE issues a new ISIN on a face-value split and similar events, so one security can span
+    several ISINs. Prices stay keyed by the ISIN they traded under; readers follow the chain.
+    """
+
+    __tablename__ = "isin_links"
+    __table_args__ = (CheckConstraint("old_isin <> new_isin", name="distinct_isins"),)
+
+    old_isin: Mapped[str] = mapped_column(ISIN, _isin_fk(), primary_key=True)
+    new_isin: Mapped[str] = mapped_column(ISIN, _isin_fk(), primary_key=True, index=True)
+    effective_date: Mapped[dt.date]
+    reason: Mapped[str] = mapped_column(String(32))
+    source: Mapped[str] = mapped_column(String(32))
+    fetched_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
+
+
 class TradingCalendar(Base):
     __tablename__ = "trading_calendar"
 

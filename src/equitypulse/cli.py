@@ -59,6 +59,7 @@ def backfill(
     from equitypulse.config import get_settings
     from equitypulse.db.session import session_factory
     from equitypulse.index_load import open_members
+    from equitypulse.isin_links import ChainUniverse
     from equitypulse.jobs.backfill import run_backfill
 
     delay = get_settings().nse_request_delay_seconds
@@ -76,7 +77,8 @@ def backfill(
             if not members:
                 typer.echo(f"No members loaded for index {universe}.", err=True)
                 raise typer.Exit(1)
-            typer.echo(f"Universe {universe}: {len(members)} ISINs")
+            typer.echo(f"Universe {universe}: {len(members)} ISINs (following ISIN changes)")
+            members = ChainUniverse.following_chains(session, members)
 
         result = run_backfill(
             session, cal, from_date, to_date, universe=members, delay_seconds=delay,
@@ -85,7 +87,8 @@ def backfill(
 
     typer.echo(
         f"Backfill: loaded {result.loaded} dates ({result.rows_written} rows), "
-        f"already loaded {result.already_loaded}, failed {len(result.failed)}"
+        f"already loaded {result.already_loaded}, failed {len(result.failed)}, "
+        f"ISIN changes linked {result.isin_links_added}"
     )
     if result.blocked:
         typer.echo("STOPPED: NSE refused repeated downloads; it may be blocking us.", err=True)

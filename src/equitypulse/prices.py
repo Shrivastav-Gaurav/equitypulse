@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from equitypulse.calendar import today_ist
 from equitypulse.db.models import PriceDaily, Security
+from equitypulse.isin_links import ChainUniverse
 from equitypulse.master import ensure_security, symbol_as_of
 from equitypulse.snapshots import store_snapshot
 from equitypulse.sources.nse import (
@@ -164,7 +165,7 @@ def load_bhavcopy(
     now: dt.datetime | None = None,
     tapetide_caller: Any = None,  # injectable for tests; None = use real MCP
     allow_fallback: bool = True,
-    universe: set[str] | None = None,
+    universe: set[str] | ChainUniverse | None = None,
 ) -> LoadPricesResult:
     """Fetch, parse and upsert daily prices for `date`.
 
@@ -172,10 +173,13 @@ def load_bhavcopy(
     falls back to Tapetide. Result carries `degraded=True` in that case.
 
     `allow_fallback=False` re-raises the NSE error instead (bulk backfills must not spend the
-    Tapetide budget). `universe`, if given, restricts the load to those ISINs.
+    Tapetide budget). `universe`, if given, restricts the load: a set keeps exactly those
+    ISINs; a ChainUniverse also keeps a member's earlier ISINs (see isin_links).
 
     Does not commit; the caller owns the transaction.
     """
+    if universe is not None and not isinstance(universe, ChainUniverse):
+        universe = ChainUniverse.strict(universe)
     try:
         udiff_text = fetch_udiff(date)
         delivery_text = fetch_delivery(date)
@@ -184,12 +188,13 @@ def load_bhavcopy(
             raise
         log.warning("NSE bhavcopy fetch failed for %s: %s — trying Tapetide fallback", date, exc)
         return _load_from_tapetide(
-            session, date, tapetide_caller=tapetide_caller, now=now, universe=universe
+            session, date, tapetide_caller=tapetide_caller, now=now,
+            universe=set(universe.isins) if universe is not None else None,
         )
 
     udiff_rows = parse_bhavcopy_udiff(udiff_text)
     if universe is not None:
-        udiff_rows = [r for r in udiff_rows if r.isin in universe]
+        udiff_rows = [r for r in udiff_rows if universe.keeps(r.isin, r.symbol)]
     delivery = parse_bhavcopy_delivery(delivery_text)
 
     store_snapshot(
