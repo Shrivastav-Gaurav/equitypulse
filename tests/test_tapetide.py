@@ -432,9 +432,10 @@ def test_fetch_price_history_gives_up_after_max_pages(db_session: Session) -> No
 
 def _usage_rows(db_session: Session) -> list[tuple]:
     import sqlite3
+    from contextlib import closing
 
     path = db_session.get_bind().url.database
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         return conn.execute("SELECT calls FROM api_usage").fetchall()
 
 
