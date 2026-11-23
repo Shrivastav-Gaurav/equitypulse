@@ -5,7 +5,8 @@ NSE issues a new ISIN for the same security on a face-value split and similar ev
 traded under; `isin_links` records the chain so loaders and readers can follow it.
 
 Rule for a link old -> new (deterministic, no guessing):
-  - same NSE symbol on both sides,
+  - a common NSE symbol: one each ISIN has held (current symbol or `symbol_history`, which the
+    NSE symbol-change list fills; ACUTAAS's new ISIN first traded as AMIORG),
   - same issuer code (ISIN characters 3-7, e.g. "E237A"): a recycled symbol belongs to a
     different issuer and is never linked,
   - old's last price row is before new's first, with at most MAX_GAP_TRADING_DAYS trading
@@ -68,6 +69,16 @@ class ChainUniverse(BaseModel):
         )
 
 
+def symbols_by_isin(session: Session) -> dict[str, set[str]]:
+    """Every symbol each ISIN has held: its current symbol plus its symbol history."""
+    held: dict[str, set[str]] = {}
+    for isin, symbol in session.execute(select(Security.isin, Security.symbol)):
+        held.setdefault(isin, set()).add(symbol)
+    for isin, symbol in session.execute(select(SymbolHistory.isin, SymbolHistory.symbol)):
+        held.setdefault(isin, set()).add(symbol)
+    return held
+
+
 def detect_links(session: Session) -> int:
     """Insert links found by the rule above; returns how many were added. Idempotent.
 
@@ -81,9 +92,10 @@ def detect_links(session: Session) -> int:
         )
     }
     groups: dict[tuple[str, str], list[str]] = {}
-    for isin, symbol in session.execute(select(Security.isin, Security.symbol)):
+    for isin, symbols in symbols_by_isin(session).items():
         if isin in spans:
-            groups.setdefault((symbol, issuer_code(isin)), []).append(isin)
+            for symbol in symbols:
+                groups.setdefault((symbol, issuer_code(isin)), []).append(isin)
 
     existing = {(o, n) for o, n in session.execute(select(IsinLink.old_isin, IsinLink.new_isin))}
     trading_days = sorted(
@@ -98,6 +110,7 @@ def detect_links(session: Session) -> int:
             old_last, new_first = spans[old][1], spans[new][0]
             if old_last >= new_first or (old, new) in existing:
                 continue
+            existing.add((old, new))  # the same pair can sit in two symbol groups
             if _trading_days_between(trading_days, old_last, new_first) > MAX_GAP_TRADING_DAYS:
                 continue
             session.add(

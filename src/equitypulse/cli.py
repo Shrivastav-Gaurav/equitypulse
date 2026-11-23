@@ -119,6 +119,64 @@ def nightly(
                + (" [DEGRADED]" if result.degraded else ""))
 
 
+@app.command("symbol-changes")
+def symbol_changes() -> None:
+    """Load NSE's symbol-change list into symbol_history, then re-run ISIN link detection."""
+    from equitypulse.audit import AuditContext
+    from equitypulse.calendar import today_ist
+    from equitypulse.db.session import session_factory
+    from equitypulse.isin_links import detect_links
+    from equitypulse.sources.nse_actions import SOURCE_SYMBOLS
+    from equitypulse.symbol_changes import load_symbol_changes
+
+    with session_factory()() as session:
+        with AuditContext(
+            session, job="symbol_changes", source=SOURCE_SYMBOLS, as_of=today_ist()
+        ) as ctx:
+            result = load_symbol_changes(session)
+            links = detect_links(session)
+            ctx.rows_in = result.changes_in_file
+            ctx.rows_written = result.inserted + links
+        session.commit()
+    typer.echo(
+        f"Symbol changes: {result.changes_in_file} in file, {result.inserted} history rows "
+        f"added, {result.already_present} already present; ISIN links added {links}"
+    )
+
+
+@app.command("corporate-actions")
+def corporate_actions(
+    from_date: dt.date = typer.Option(  # noqa: B008
+        ..., "--from", formats=["%Y-%m-%d"], help="First ex-date (inclusive)"
+    ),
+    to_date: dt.date = typer.Option(  # noqa: B008
+        ..., "--to", formats=["%Y-%m-%d"], help="Last ex-date (inclusive)"
+    ),
+) -> None:
+    """Load NSE split/bonus/rights/demerger actions for securities we hold prices for."""
+    from equitypulse.audit import AuditContext
+    from equitypulse.corporate_actions_nse import load_nse_corporate_actions
+    from equitypulse.db.session import session_factory
+    from equitypulse.sources.nse_actions import SOURCE_ACTIONS
+
+    with session_factory()() as session:
+        with AuditContext(
+            session, job="corporate_actions", source=SOURCE_ACTIONS, as_of=to_date
+        ) as ctx:
+            result = load_nse_corporate_actions(session, from_date, to_date)
+            ctx.rows_in = result.rows_in
+            ctx.rows_written = result.inserted
+            ctx.anomaly_count = result.unparsed
+            ctx.degraded = result.unparsed > 0
+        session.commit()
+    typer.echo(
+        f"Corporate actions {from_date}..{to_date}: {result.rows_in} rows, {result.inserted} "
+        f"stored, {result.already_present} already present, {result.not_in_universe} outside "
+        f"our securities, {result.skipped_kinds} dividends/other skipped, {result.unparsed} "
+        "unparsed split/bonus mentions (stored as OTHER, no factor)"
+    )
+
+
 @app.command()
 def status() -> None:
     """Show freshness per source and Tapetide calls used today."""
