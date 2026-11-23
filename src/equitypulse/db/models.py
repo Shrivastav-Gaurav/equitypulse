@@ -9,7 +9,8 @@ Design rules this schema enforces, so later code can't quietly break them:
   fractions (0..1), which CHECK constraints enforce so a stray 48.6 can't pass for 48.6%.
 - ISIN is the security key; other tables reference `securities.isin`, except `surveillance`
   (NSE lists include SME/other-series stocks that are not in the equity master).
-- `snapshots` and `data_audit` are append-only: the ORM refuses updates and deletes on them,
+- `snapshots`, `data_audit`, `param_sets`, `recommendations` and `decisions` are append-only:
+  the ORM refuses updates and deletes on them,
   and database triggers (created in the migration) refuse them from raw SQL too.
 """
 
@@ -17,6 +18,7 @@ import datetime as dt
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     CheckConstraint,
     ForeignKey,
@@ -337,7 +339,177 @@ class NameMap(Base):
     verified: Mapped[bool] = mapped_column(default=False)
 
 
-APPEND_ONLY_MODELS: tuple[type[Base], ...] = (Snapshot, DataAudit)
+# --- Phase 1a ----------------------------------------------------------------------------
+
+HORIZONS = ("1m", "3m", "6m", "10d")
+SCAN_HORIZONS = ("1m", "3m", "6m")  # 10d is research-only: never on a card
+DECISION_ACTIONS = ("TAKE", "SKIP")
+
+
+def _percentile(column: str) -> str:
+    return f"{column} IS NULL OR ({column} >= 0 AND {column} <= 100)"
+
+
+class Fundamental(Base):
+    """One reported number per filing. A restatement is a new row; the original stays.
+
+    A factor for date D reads the latest row with `filing_date <= D`. When the source gives no
+    filing date, `filing_date` is the SEBI results deadline (quarter end + 45 days, Q4 + 60)
+    and `filing_date_estimated` is true, so the lag is never shorter than reality allowed.
+    """
+
+    __tablename__ = "fundamentals"
+
+    isin: Mapped[str] = mapped_column(ISIN, _isin_fk(), primary_key=True)
+    period_end: Mapped[dt.date] = mapped_column(primary_key=True)
+    statement: Mapped[str] = mapped_column(String(32), primary_key=True)
+    field: Mapped[str] = mapped_column(String(64), primary_key=True)
+    filing_date: Mapped[dt.date] = mapped_column(primary_key=True, index=True)
+    filing_date_estimated: Mapped[bool] = mapped_column(default=False)
+    value: Mapped[float]
+    source: Mapped[str] = mapped_column(String(32))
+    fetched_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
+
+
+class IndexLevel(Base):
+    """Daily index close (and total-return close where published), and India VIX."""
+
+    __tablename__ = "index_levels"
+    __table_args__ = (
+        CheckConstraint("close > 0", name="close_positive"),
+        CheckConstraint("tri_close IS NULL OR tri_close > 0", name="tri_close_positive"),
+    )
+
+    index_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    date: Mapped[dt.date] = mapped_column(primary_key=True, index=True)
+    close: Mapped[float]
+    tri_close: Mapped[float | None]
+    source: Mapped[str] = mapped_column(String(32))
+    fetched_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
+
+
+class ParamSet(Base):
+    """A registered parameter file. Append-only: a changed file must get a new version."""
+
+    __tablename__ = "param_sets"
+
+    version: Mapped[str] = mapped_column(String(32), primary_key=True)
+    hash: Mapped[str] = mapped_column(String(64), unique=True)
+    yaml: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
+
+
+class Feature(Base):
+    """Factor inputs, sector percentiles and composites for one stock on one date.
+
+    Idempotent per (isin, as_of, params_version). Percentiles are 0-100; a factor that could
+    not be scored is NULL, never 0.
+    """
+
+    __tablename__ = "features"
+    __table_args__ = tuple(
+        CheckConstraint(_percentile(c), name=f"{c}_range")
+        for c in (
+            "pct_momentum", "pct_volume_delivery", "pct_reported_growth", "pct_quality",
+            "pct_valuation", "pct_earnings_revisions", "pct_flows",
+            "composite_1m", "composite_3m", "composite_6m", "composite_10d",
+        )
+    )
+
+    isin: Mapped[str] = mapped_column(ISIN, _isin_fk(), primary_key=True)
+    as_of: Mapped[dt.date] = mapped_column(primary_key=True, index=True)
+    params_version: Mapped[str] = mapped_column(
+        String(32), ForeignKey("param_sets.version"), primary_key=True
+    )
+    sector_group: Mapped[str | None] = mapped_column(String(128))
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSON)
+    pct_momentum: Mapped[float | None]
+    pct_volume_delivery: Mapped[float | None]
+    pct_reported_growth: Mapped[float | None]
+    pct_quality: Mapped[float | None]
+    pct_valuation: Mapped[float | None]
+    pct_earnings_revisions: Mapped[float | None]
+    pct_flows: Mapped[float | None]
+    composite_1m: Mapped[float | None]
+    composite_3m: Mapped[float | None]
+    composite_6m: Mapped[float | None]
+    composite_10d: Mapped[float | None]
+    factors_scored: Mapped[int] = mapped_column(default=0)
+    frameworks: Mapped[dict[str, Any]] = mapped_column(JSON)
+    flags: Mapped[dict[str, Any]] = mapped_column(JSON)
+    data_ok: Mapped[bool]
+    computed_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
+
+
+class Scan(Base):
+    """Every scan request, stored before it runs, including ones that return no cards."""
+
+    __tablename__ = "scans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[dt.datetime] = mapped_column(default=utcnow, index=True)
+    as_of: Mapped[dt.date] = mapped_column(index=True)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON)
+    request_hash: Mapped[str] = mapped_column(String(64), index=True)
+    params_version: Mapped[str] = mapped_column(String(32), ForeignKey("param_sets.version"))
+    data_snapshot_ids: Mapped[list[int]] = mapped_column(JSON)
+    regime: Mapped[str] = mapped_column(String(16))
+
+
+class Recommendation(Base):
+    """The prediction ledger: one trade card, written before it is shown. Append-only."""
+
+    __tablename__ = "recommendations"
+    __table_args__ = (
+        CheckConstraint(_one_of("horizon", SCAN_HORIZONS), name="horizon"),
+        CheckConstraint("stop > 0 AND stop < entry AND entry < target", name="price_order"),
+        CheckConstraint("qty > 0", name="qty_positive"),
+        CheckConstraint(_fraction("hit_p"), name="hit_p_fraction"),
+        CheckConstraint(_fraction("hit_low"), name="hit_low_fraction"),
+        CheckConstraint(_fraction("hit_high"), name="hit_high_fraction"),
+        CheckConstraint("hit_n IS NULL OR hit_n >= 0", name="hit_n_non_negative"),
+        CheckConstraint(_percentile("composite"), name="composite_range"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id"), index=True)
+    isin: Mapped[str] = mapped_column(ISIN, _isin_fk(), index=True)
+    horizon: Mapped[str] = mapped_column(String(4))
+    entry: Mapped[float]
+    target: Mapped[float]
+    stop: Mapped[float]
+    qty: Mapped[int]
+    exit_by: Mapped[dt.date]
+    composite: Mapped[float]
+    factor_scores: Mapped[dict[str, Any]] = mapped_column(JSON)
+    hit_p: Mapped[float | None]
+    hit_low: Mapped[float | None]
+    hit_high: Mapped[float | None]
+    hit_n: Mapped[int | None]
+    expected_net: Mapped[float | None]
+    flags: Mapped[dict[str, Any]] = mapped_column(JSON)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    prompt_version: Mapped[str | None] = mapped_column(String(32))
+    row_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[dt.datetime] = mapped_column(default=utcnow, index=True)
+
+
+class Decision(Base):
+    """My Take/Skip on a card. Append-only; the latest row per recommendation wins."""
+
+    __tablename__ = "decisions"
+    __table_args__ = (CheckConstraint(_one_of("action", DECISION_ACTIONS), name="action"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(ForeignKey("recommendations.id"), index=True)
+    action: Mapped[str] = mapped_column(String(8))
+    reason: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[dt.datetime] = mapped_column(default=utcnow)
+
+
+APPEND_ONLY_MODELS: tuple[type[Base], ...] = (
+    Snapshot, DataAudit, ParamSet, Recommendation, Decision
+)
 
 
 class AppendOnlyError(RuntimeError):

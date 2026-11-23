@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from equitypulse.calendar import today_ist
-from equitypulse.db.models import IndexMembership
+from equitypulse.db.models import IndexMembership, Security
 from equitypulse.master import ensure_security
 from equitypulse.snapshots import store_snapshot
 from equitypulse.sources.indices import SOURCE, IndexConstituent, fetch_index_csv, parse_index_csv
@@ -27,6 +27,7 @@ class LoadIndexResult(BaseModel):
     added: int = 0
     removed: int = 0
     unchanged: int = 0
+    sector_updated: int = 0
 
 
 def load_index_membership(
@@ -93,6 +94,16 @@ def load_index_membership(
             result.added += 1
         else:
             result.unchanged += 1
+
+    # The constituent CSV has one classification level (its "Industry" column, about 20 groups).
+    # It is the fixed sector taxonomy; it fills both fields until T21 refines the grouping.
+    session.flush()
+    for c in constituents:
+        sec = session.get(Security, c.isin)
+        label = c.industry
+        if sec is not None and label and (sec.sector, sec.industry) != (label, label):
+            sec.sector = sec.industry = label
+            result.sector_updated += 1
 
     for isin, row in open_rows.items():
         if isin not in incoming:

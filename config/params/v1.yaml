@@ -1,0 +1,125 @@
+# EquityPulse parameters, version v1 (Phase 1a). Source: docs/phase1a_spec.md, PRD v2 as of
+# 23 Nov 2026. A registered version can never change: edit a copy as v2 instead.
+# Weights are percentages; rates, fractions and caps are fractions (0.01 = 1%).
+version: v1
+
+horizons:
+  offered: [1m, 3m, 6m]          # what a scan may use
+  default: 3m                    # primary horizon; "best fit" ties and no choice go here
+  research_only: [10d]           # computed in research (T27/T29), never offered in scans
+  trading_days: {1m: 21, 3m: 63, 6m: 126, 10d: 10}
+
+factors:
+  scored: [momentum, volume_delivery, reported_growth, quality, valuation]
+  not_yet_scored: [earnings_revisions, flows]     # Phase 1b, forward-only
+  reported_growth_share_of_earnings: 0.5
+  # PRD v2 starting weights, six factors. earnings_momentum = reported growth + analyst
+  # revisions and result surprise. The 6m row is inferred from the spec's 6m column (the only
+  # solution with flows at 15, as in the other horizons): confirm it against the PRD.
+  prior_weights:
+    1m:  {momentum: 35, volume_delivery: 15, earnings_momentum: 20, quality: 10, valuation: 5, flows: 15}
+    3m:  {momentum: 25, volume_delivery: 5, earnings_momentum: 25, quality: 20, valuation: 10, flows: 15}
+    6m:  {momentum: 20, volume_delivery: 0, earnings_momentum: 25, quality: 25, valuation: 15, flows: 15}
+    10d: {momentum: 45, volume_delivery: 20, earnings_momentum: 15, quality: 5, valuation: 0, flows: 15}
+  # Phase 1a weights (the spec's table). params.py checks that they follow from prior_weights:
+  # reported_growth gets its share of earnings_momentum, the rest is spread proportionally.
+  weights:
+    1m:  {momentum: 46.7, volume_delivery: 20.0, reported_growth: 13.3, quality: 13.3, valuation: 6.7}
+    3m:  {momentum: 34.5, volume_delivery: 6.9, reported_growth: 17.2, quality: 27.6, valuation: 13.8}
+    6m:  {momentum: 27.6, volume_delivery: 0.0, reported_growth: 17.2, quality: 34.5, valuation: 20.7}
+    10d: {momentum: 58.0, volume_delivery: 25.8, reported_growth: 9.7, quality: 6.5, valuation: 0.0}
+  min_sector_size: 8               # smaller sectors use the parent group
+  max_weight_change_per_month: 5   # learning loop, through champion/challenger only
+
+universe:
+  index: NIFTY500
+  series: [EQ]                     # BE/BZ (trade-for-trade) and SME excluded
+  exclude_surveillance: [ASM, GSM, ESM, IBC]
+  market_cap_floor_cr: 2000        # a scan may raise it, never lower it
+  market_cap_default_cr: 5000
+  min_median_traded_value_cr: 10   # 20-day median
+  min_price: 50
+  min_history_trading_days: 200
+  price_stale_trading_days: 1
+  exclude_at_red_flags: 2
+  exclude_at_operator_flags: 2
+
+regime:
+  index: NIFTY500
+  ma_days: 200                     # risk-off when the index is below this average ...
+  vix_above: 20                    # ... and India VIX is above this
+  blocked_horizons: [1m]
+  halve_risk_horizons: [3m, 6m]
+
+trade_plan:
+  atr_days: 14
+  min_reward_risk: 2.0             # below this after the target cap: rejected, not squeezed
+  entry_window_trading_days: 2
+  skip_gap_above_entry_atr: 1.0
+  target_cap: nearest_resistance   # prior swing high or 52-week high
+  long_term_conversion: false      # never converted at the time stop until UC4 exists
+  horizons:
+    1m:
+      entry: {pullback_ma_days: 20}
+      stop: {atr: 2.0, structure: swing_low, structure_days: 20}
+      target_atr: 4.5
+      time_stop_days: 21
+      trail: {breakeven_at_atr: 2.0, trail_atr: 2.0}
+    3m:
+      entry: {pullback_ma_days: 50}
+      stop: {atr: 2.5, structure: moving_average, structure_days: 50}
+      target_atr: 7.0
+      time_stop_days: 63
+      trail: {after_atr: 3.0, below_ma_days: 20}
+    6m:
+      entry: {pullback_ma_days: 50}
+      stop: {atr: 3.5, structure: moving_average, structure_days: 100}
+      target_atr: 10.0
+      time_stop_days: 126
+      time_stop_extension: {to_days: 189, while_above_ma_days: 50}
+      trail: {breakeven_at_atr: 3.0, below_ma_days: 50, weekly_closes: true}
+    10d:
+      entry: {breakout_retest_within_atr: 1.0}
+      stop: {atr: 1.5, structure: swing_low, structure_days: 10}
+      target_atr: 3.0
+      time_stop_days: 10
+      trail: {breakeven_at_atr: 1.5}
+
+risk:
+  risk_per_trade: 0.01             # of Satellite capital; halved by the regime gate
+  max_position: 0.10
+  max_adv_fraction: 0.01
+  adv_days: 20
+  max_open_positions: 20
+  max_sector_capital: 0.25
+  max_sector_positions: 4
+  max_new_per_scan: 5
+  max_per_sector_cross_market: 2
+  correlation_flag_above: 0.8
+  kill_switch: {drawdown: 0.10, consecutive_stopouts: 6}
+
+costs_tax:
+  round_trip_cost_liquid: 0.003    # STT, stamp duty, exchange and DP charges, slippage
+  stcg_rate: 0.20                  # every hold under 12 months, including 6-9 months
+  ltcg_rate: 0.125
+  ltcg_exemption_inr: 125000
+  ltcg_after_months: 12
+
+calibration:
+  min_n: 100                       # below this the card says "insufficient history"
+
+ranking:
+  picks: 5
+  watch_list: 5
+  tie_break: liquidity
+
+long_term_flag:
+  piotroski_min: 7
+  roce_5y_min: 0.15
+  lender_roa_min: 0.012
+  beneish_max: -1.78
+  above_ma_days: 200
+
+backtest:
+  holdout_months: 12
+  early_exit_composite_pct_below: 40

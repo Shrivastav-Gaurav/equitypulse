@@ -133,3 +133,24 @@ def test_parse_skips_nse_placeholder_rows() -> None:
     rows = parse_index_csv(text, "NIFTY500")
     assert len(rows) == 10
     assert "DUM545A01024" not in {r.isin for r in rows}
+
+
+def test_load_fills_sector_and_industry_from_the_csv(db_session: Session) -> None:
+    result = load_index_membership(db_session, "NIFTY500", fetch=_fetch, as_of=DATE1, now=_NOW)
+    sec = db_session.get(Security, "INE002A01018")
+    assert (sec.sector, sec.industry) == ("Oil Gas & Consumable Fuels",) * 2
+    assert result.sector_updated == 10
+    again = load_index_membership(db_session, "NIFTY500", fetch=_fetch, as_of=DATE1, now=_NOW)
+    assert again.sector_updated == 0
+
+
+def test_a_reclassified_stock_gets_the_new_sector(db_session: Session) -> None:
+    load_index_membership(db_session, "NIFTY500", fetch=_fetch, as_of=DATE1, now=_NOW)
+    moved = NIFTY500_CSV.replace(
+        "ITC Limited,Fast Moving Consumer Goods", "ITC Limited,Diversified"
+    )
+    result = load_index_membership(
+        db_session, "NIFTY500", fetch=lambda _i: moved, as_of=DATE2, now=_NOW
+    )
+    assert result.sector_updated == 1
+    assert db_session.get(Security, "INE154A01025").sector == "Diversified"

@@ -21,10 +21,17 @@ from equitypulse.db.models import (
     Base,
     CorporateAction,
     DataAudit,
+    Decision,
+    Feature,
+    Fundamental,
+    IndexLevel,
     IndexMembership,
     IsinLink,
     NameMap,
+    ParamSet,
     PriceDaily,
+    Recommendation,
+    Scan,
     Security,
     SmallcaseEvent,
     SmallcaseIndex,
@@ -59,6 +66,13 @@ SPEC_TABLES = {
     "smallcase_index",
     "name_map",
     "isin_links",
+    "fundamentals",
+    "index_levels",
+    "param_sets",
+    "features",
+    "scans",
+    "recommendations",
+    "decisions",
 }
 
 # The natural key of each table: re-inserting a row with the same key must fail.
@@ -78,6 +92,12 @@ NATURAL_KEYS: dict[str, set[str]] = {
     "smallcase_index": {"smallcase", "date"},
     "name_map": {"raw_name"},
     "isin_links": {"old_isin", "new_isin"},
+    "fundamentals": {"isin", "period_end", "statement", "field", "filing_date"},
+    "index_levels": {"index_name", "date"},
+    "param_sets": {"version"},
+    "features": {"isin", "as_of", "params_version"},
+    "recommendations": {"row_hash"},
+    # scans and decisions are event logs: a re-run scan or a changed mind is a new row.
 }
 
 # Columns later phases filter by: each must lead an index (or the primary key).
@@ -95,6 +115,12 @@ FILTER_COLUMNS: dict[str, set[str]] = {
     "isin_links": {"old_isin", "new_isin"},
     "symbol_history": {"isin", "symbol"},
     "securities": {"symbol"},
+    "fundamentals": {"isin", "filing_date"},
+    "index_levels": {"index_name", "date"},
+    "features": {"isin", "as_of"},
+    "scans": {"as_of", "request_hash"},
+    "recommendations": {"scan_id", "isin", "created_at"},
+    "decisions": {"recommendation_id"},
 }
 
 
@@ -216,6 +242,82 @@ def sample_rows() -> dict[type[Base], dict[str, Any]]:
         NameMap: dict(
             raw_name="Reliance Industries", isin=ISIN, method="exact", confidence=1.0, verified=True
         ),
+        Fundamental: dict(
+            isin=ISIN,
+            period_end=dt.date(2026, 9, 30),
+            statement="quarterly",
+            field="sales",
+            filing_date=dt.date(2026, 10, 17),
+            filing_date_estimated=False,
+            value=258027.0,
+            source="TAPETIDE",
+            fetched_at=FETCHED,
+        ),
+        IndexLevel: dict(
+            index_name="NIFTY500", date=D, close=22850.5, tri_close=None,
+            source="NIFTYINDICES", fetched_at=FETCHED,
+        ),
+        ParamSet: dict(version="v1", hash="a" * 64, yaml="version: v1\n", created_at=FETCHED),
+        Feature: dict(
+            isin=ISIN,
+            as_of=D,
+            params_version="v1",
+            sector_group="Oil Gas & Consumable Fuels",
+            inputs={"ret_3m": 0.081},
+            pct_momentum=72.5,
+            pct_volume_delivery=40.0,
+            pct_reported_growth=None,
+            pct_quality=61.0,
+            pct_valuation=35.0,
+            pct_earnings_revisions=None,
+            pct_flows=None,
+            composite_1m=60.1,
+            composite_3m=58.4,
+            composite_6m=55.0,
+            composite_10d=62.0,
+            factors_scored=4,
+            frameworks={"piotroski": 6},
+            flags={},
+            data_ok=True,
+            computed_at=FETCHED,
+        ),
+        Scan: dict(
+            id=1,
+            created_at=FETCHED,
+            as_of=D,
+            request_json={"horizon": "3m", "picks": 5},
+            request_hash="b" * 64,
+            params_version="v1",
+            data_snapshot_ids=[1, 2],
+            regime="NORMAL",
+        ),
+        Recommendation: dict(
+            id=1,
+            scan_id=1,
+            isin=ISIN,
+            horizon="3m",
+            entry=1335.4,
+            target=1480.0,
+            stop=1270.0,
+            qty=10,
+            exit_by=dt.date(2027, 2, 10),
+            composite=58.4,
+            factor_scores={"momentum": 72.5},
+            hit_p=None,
+            hit_low=None,
+            hit_high=None,
+            hit_n=None,
+            expected_net=None,
+            flags={},
+            rationale=None,
+            prompt_version=None,
+            row_hash="c" * 64,
+            created_at=FETCHED,
+        ),
+        Decision: dict(
+            id=1, recommendation_id=1, action="SKIP", reason="results next week",
+            decided_at=FETCHED,
+        ),
     }
 
 
@@ -250,6 +352,21 @@ def engine(db_url: str) -> Iterator[Engine]:
 def session(engine: Engine) -> Iterator[Session]:
     with Session(engine) as s:
         yield s
+
+
+def add_parents(session: Session, model: type[Base]) -> None:
+    """Rows the given model's foreign keys need, beyond the securities."""
+    rows = sample_rows()
+    needs = {
+        Feature: [ParamSet],
+        Scan: [ParamSet],
+        Recommendation: [ParamSet, Scan],
+        Decision: [ParamSet, Scan, Recommendation],
+    }.get(model, [])
+    for parent in needs:
+        session.add(parent(**rows[parent]))
+        session.flush()
+    session.commit()
 
 
 def add_parent_security(session: Session) -> None:
@@ -345,10 +462,15 @@ def test_schema_declares_natural_key(engine: Engine, table: str) -> None:
     assert NATURAL_KEYS[table] in keys
 
 
-@pytest.mark.parametrize("model", list(sample_rows()), ids=lambda m: m.__tablename__)
+@pytest.mark.parametrize(
+    "model",
+    [m for m in sample_rows() if m.__tablename__ in NATURAL_KEYS],
+    ids=lambda m: m.__tablename__,
+)
 def test_duplicate_natural_key_is_rejected(session: Session, model: type[Base]) -> None:
     if model is not Security:
         add_parent_security(session)
+    add_parents(session, model)
     values = {k: v for k, v in sample_rows()[model].items() if k != "id"}
     table = model.__table__
     session.execute(insert(table).values(**values))
