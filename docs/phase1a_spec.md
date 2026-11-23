@@ -13,10 +13,16 @@ differ, the PRD wins; raise the difference instead of coding around it.
 
 - **Six sector-relative factors, not fixed points.** Each factor is a percentile rank (0–100)
   within the stock's sector; the composite is a weighted mean, so it is 0–100 by construction.
-- **Phase 1a scores four factors**: Momentum, Volume and delivery, Quality, Valuation.
-  Earnings momentum and Flows and sentiment need analyst/news history that does not exist
-  point-in-time yet; they arrive in Phase 1b, forward-only. Their PRD weights are spread over the
-  four factors (table below), and every card says "scored on 4 of 6 factors".
+- **Horizons (decided 23 Nov 2026).** 3 months is the primary horizon and the "best fit" default;
+  6 months (extendable to 9) is the second. 1 month is offered but only reported at the gate.
+  10 days is research-only: computed in T27/T29, not offered in scans.
+- **Phase 1a scores five factors**: Momentum, Volume and delivery, Reported growth, Quality,
+  Valuation. Earnings momentum is split: *Reported growth* (sales and EPS growth from
+  filing-date-lagged financials) has point-in-time history and is scored now; analyst revisions
+  and result surprise arrive in Phase 1b, forward-only, with Flows and sentiment. In 1a, Reported
+  growth carries half the PRD Earnings-momentum weight; the other half and the Flows weight are
+  spread proportionally over the scored factors (table below). Every card says "analyst and flows
+  factors not yet scored".
 - **No model in the score.** No LLM, FinBERT or other learned model contributes to any gate,
   factor, composite, price, quantity or ranking (CLAUDE.md hard rule). Filing sentiment is a
   Phase 2 candidate behind an IC test. The only LLM in 1a writes the rationale, behind a
@@ -31,11 +37,11 @@ differ, the PRD wins; raise the difference instead of coding around it.
 | In scope | Out of scope (later phases) |
 | --- | --- |
 | Split/bonus-adjusted price series (read-time) | Kite holdings sync, GTT helper, monitor, alerts (1b) |
-| Price history 2019 → today; point-in-time Nifty 500 membership | Earnings momentum, analyst and flows factors (1b, forward-only) |
+| Price history 2019 → today; point-in-time Nifty 500 membership | Analyst revisions, result surprise and flows factors (1b, forward-only) |
 | Index levels: Nifty 500, Nifty200 Momentum 30 TRI, sector indices, India VIX | Outcome labelling, calibration jobs (1b) |
 | Sector taxonomy; fundamentals and lender metrics, lagged to filing date | Filing-sentiment model, Performance screen (2) |
 | Universe hard filters, operator-pattern flags, soft filters, data-quality gate | LightGBM ranker, Kronos (3) |
-| Momentum, Volume/delivery, Quality, Valuation factors; financials model for lenders | Core-bucket holding review (UC4) |
+| Momentum, Volume/delivery, Reported growth, Quality, Valuation factors; financials model for lenders | Core-bucket holding review (UC4); long-term conversion at time stop |
 | Frameworks: Piotroski, Beneish, Altman Z, Mohanram, Minervini, Weinstein | Comparator UC3 (1b) |
 | Composite, regime gate, missing-data handling, params registry | Cloud deployment of anything |
 | Trade plan engine, sizing, costs and tax, expected net return | |
@@ -55,7 +61,7 @@ src/equitypulse/
   sources/tapetide.py        # + financials, ratios, lender metrics, shareholding wrappers
   fundamentals.py            # fundamentals loader (filing-date lagged)
   universe.py                # gates, hard/soft filters, operator flags, data-quality gate
-  factors/                   # momentum.py, volume.py, quality.py, valuation.py, frameworks.py
+  factors/                   # momentum.py, volume.py, growth.py, quality.py, valuation.py, frameworks.py
   signal.py                  # percentiles, composite, regime gate, missing-data weights
   params.py                  # load + hash the params YAML
   plan.py                    # trade plan engine, sizing, costs/tax, expected net return
@@ -96,7 +102,7 @@ reads it.
 | Symbol changes | NSE symbol-change list (verify URL and columns) | Fills `symbol_history` with past symbols, so link detection also catches an ISIN change made before a rename (ACUTAAS: ISIN changed 2025-04-25 while still AMIORG) |
 | Historical Nifty 500 membership | Tapetide `get_index_membership_asof`, month-ends 2019 → today | About 95 calls, spread over days within the budget; cached forever |
 | Index levels, TRI, India VIX | niftyindices.com / NSE archives | Verify the endpoint; Tapetide `get_index_history` / `get_india_vix` as fallback |
-| Fundamentals, ratios | Tapetide `get_batch_financials`, `get_screener_ratios` | Verify parameters and batch size with ≤ 3 live calls before coding |
+| Fundamentals, ratios | Tapetide `get_batch_financials`, `get_screener_ratios` | Verify parameters, batch size, quarterly history depth (2018-Q1 onward, for YoY growth in 2019) and whether filing dates are returned, with ≤ 3 live calls before coding. No filing date → lag to quarter end + 45 days (Q4: + 60), the SEBI results deadlines |
 | Lender metrics | Tapetide `get_lender_metrics` | Banks, NBFCs, insurers only (about 60 names) |
 | Shareholding, pledge | Tapetide `get_shareholding`, `get_promoter_pledge` | For operator flags; quarterly |
 
@@ -119,7 +125,7 @@ reason the Scan screen can show.
 4. **Operator-pattern flags**: computed from stored data; 2 or more excludes. A flag whose input is
    missing is reported as *not checked*, never as passed.
 5. **Regime gate** (scan level): Nifty 500 below its 200-day average **and** India VIX above 20 →
-   no new 10-day trades; 1-month and 3-month risk per trade halved.
+   no new 1-month trades; 3-month and 6-month risk per trade halved.
 
 ## Factors (sector-relative percentiles, 0–100)
 
@@ -129,19 +135,24 @@ reason the Scan screen can show.
 | Volume and delivery | Volume vs 20-day average; delivery % vs its 60-day average |
 | Quality | 3–5 year ROCE/ROE, Piotroski F, Beneish M, D/E, pledge. **Lenders** use ROA, NIM, GNPA/NNPA trend, CASA (banks), capital adequacy, credit cost; promoter holding not scored |
 | Valuation | P/E and EV/EBITDA vs own 5-year median and sector median; penalises only extreme expensiveness |
+| Reported growth | Latest-quarter YoY and QoQ sales and EPS growth; 3-year sales CAGR. Lenders use loan-book and net-interest-income growth. Filing-date-lagged financials only |
 
 Percentiles are taken within sector across the eligible universe on that date; sectors with fewer
 than 8 eligible stocks use the parent group or the whole universe, and the card says which.
 
-**Phase 1a horizon weights (%)** — PRD weights with Earnings momentum and Flows spread
-proportionally over the four scored factors:
+**Phase 1a horizon weights (%)** — PRD weights, with half of Earnings momentum on Reported growth
+and the rest of Earnings momentum plus Flows spread proportionally over the scored factors:
 
-| Factor | 10 days | 1 month | 3 months |
-| --- | --- | --- | --- |
-| Momentum | 64.3 | 53.8 | 41.7 |
-| Volume and delivery | 28.6 | 23.1 | 8.3 |
-| Quality | 7.1 | 15.4 | 33.3 |
-| Valuation | 0.0 | 7.7 | 16.7 |
+| Factor | 1 month | 3 months (primary) | 6 months | 10 days (research) |
+| --- | --- | --- | --- | --- |
+| Momentum | 46.7 | 34.5 | 27.6 | 58.0 |
+| Volume and delivery | 20.0 | 6.9 | 0.0 | 25.8 |
+| Reported growth | 13.3 | 17.2 | 17.2 | 9.7 |
+| Quality | 13.3 | 27.6 | 34.5 | 6.5 |
+| Valuation | 6.7 | 13.8 | 20.7 | 0.0 |
+
+If Reported growth fails the IC bar (gate check 4), its weight is spread the same way; for 3 months
+that gives Momentum 41.7, Volume 8.3, Quality 33.3, Valuation 16.7.
 
 A factor missing for one stock has its weight spread over that stock's remaining factors; it is
 never scored as zero. Every backtest also runs an equal-weight version; if equal weights do as
@@ -149,13 +160,14 @@ well, the params file switches to equal weights.
 
 ## Trade plan (PRD parameters, in `config/params/v1.yaml`)
 
-| Rule | 10 days | 1 month | 3 months |
-| --- | --- | --- | --- |
-| Entry (limit) | Last close, or breakout-retest level if within 1×ATR below | Last close or 20-day average pullback | Last close or 50-day average pullback |
-| Stop | Entry − 1.5×ATR, or below 10-day swing low | Entry − 2×ATR, or below 20-day swing low | Entry − 2.5×ATR, or below 50-day average |
-| Target | Entry + 3×ATR | Entry + 4.5×ATR | Entry + 7×ATR |
-| Target cap | Nearest resistance (prior swing high / 52-week high) | Same | Same |
-| Time stop | 10 trading days | 21 trading days | 63 trading days |
+| Rule | 1 month | 3 months (primary) | 6 months (to 9) | 10 days (research) |
+| --- | --- | --- | --- | --- |
+| Entry (limit) | Last close or 20-day average pullback | Last close or 50-day average pullback | Last close or 50-day average pullback | Last close, or breakout-retest level if within 1×ATR below |
+| Stop | Entry − 2×ATR, or below 20-day swing low | Entry − 2.5×ATR, or below 50-day average | Entry − 3.5×ATR, or below 100-day average | Entry − 1.5×ATR, or below 10-day swing low |
+| Target | Entry + 4.5×ATR | Entry + 7×ATR | Entry + 10×ATR | Entry + 3×ATR |
+| Target cap | Nearest resistance (prior swing high / 52-week high) | Same | Same | Same |
+| Time stop | 21 trading days | 63 trading days | 126 trading days; extends to 189 if price is above its 50-day average and the trail is not hit | 10 trading days |
+| Trailing stop | Breakeven at +2×ATR, then trail 2×ATR | Trail below 20-day average after +3×ATR | Breakeven at +3×ATR, then below the 50-day average on weekly closes | Breakeven at +1.5×ATR |
 
 ATR is the 14-day average true range on adjusted prices. The wider of the ATR stop and the
 structure stop is used. Reward:risk below 2.0 after the target cap is **rejected**, not squeezed.
@@ -168,7 +180,7 @@ rules are stored on the card for the 1b monitor.
 \text{qty} = \min\left(\left\lfloor \frac{\text{capital} \times r}{\text{entry} - \text{stop}} \right\rfloor,\ \left\lfloor \frac{\text{capital} \times 10\%}{\text{entry}} \right\rfloor,\ 1\% \times \text{ADV}_{20}\right)
 ```
 
-r = 1% of Satellite capital (halved by the regime gate for 1m/3m); ADV₂₀ = 20-day average daily
+r = 1% of Satellite capital (halved by the regime gate for 3m/6m); ADV₂₀ = 20-day average daily
 volume in shares. If free cash is lower, quantity scales down and the card says so.
 
 **Expected net return**
@@ -177,11 +189,13 @@ volume in shares. If free cash is lower, quantity scales down and the card says 
 E = p \times G - (1 - p) \times L - c
 ```
 
-p = calibrated hit rate from backtested similar setups (horizon × composite band × regime), shown
+p = calibrated hit rate from backtested similar setups (horizon × composite band × regime, built from every eligible setup in the backtest, not only
+the top-5 picks), shown
 with its range and n; "insufficient history" when n < 100. c = round-trip costs (STT, stamp duty,
 exchange and DP charges, slippage; about 0.3% for liquid stocks, more for mid caps), then 20% STCG;
-long-term candidates also show 12.5% LTCG above ₹1.25 lakh. "Best fit" picks the horizon with the
-highest E after tax.
+long-term candidates also show 12.5% LTCG above ₹1.25 lakh. "Best fit" picks, among 1 month, 3 months and 6 months, the horizon with the
+highest E after tax; ties and "no horizon chosen" go to 3 months. Every hold under 12 months,
+including 6–9 months, pays STCG.
 
 **Ranking.** Opportunity score = composite × p × reward:risk; ties go to higher liquidity.
 Cross-market scans take at most 2 per sector; per-sector cap 25% of Satellite capital and 4
@@ -190,7 +204,8 @@ from an optional manual list and default to none.
 
 **Long-term flag** (PRD quality gate): Piotroski ≥ 7; 5-year average ROCE ≥ 15% (lenders: ROA ≥
 1.2% and GNPA falling); Beneish M < −1.78; D/E below sector median; no red flags; price above the
-200-day average.
+200-day average. Until the holding review (UC4) exists the flag is informational: a trade is never
+converted to a long-term holding at its time stop; it exits by its own rules.
 
 ## Scan, ledger and rationale
 
@@ -205,6 +220,21 @@ from an optional manual list and default to none.
   two failures fall back to a template sentence. The rationale never changes a field.
 - Prompt parser (Haiku) may only choose catalogue fields and values; words it cannot map are shown
   as "not understood". The structured request is shown and confirmed before the scan runs.
+
+## Backtest fill and exit rules
+
+End-of-day data cannot show the order of moves inside a day, so the backtest is conservative:
+
+- If a day's high reaches the target and its low reaches the stop, the stop is taken.
+- A gap down through the stop fills at that day's open, not at the stop; a gap up through the
+  target fills at the target.
+- Entry fills only if the limit trades inside the entry window; an open more than 1×ATR above
+  entry is a skip.
+- Trailing-stop changes are computed after the close and apply from the next session, as the GTT
+  would be modified live.
+- An early-exit variant (exit at the next open when the composite falls below its 40th
+  percentile) runs against the plain rules and is adopted only if it does better net of costs
+  and tax.
 
 ## Point-in-time and honesty rules
 
@@ -224,19 +254,30 @@ from an optional manual list and default to none.
    trading-day rows, each gap explained in `data_audit`; adjusted closes match Tapetide's
    split/bonus-adjusted closes on a 20-stock sample to within 0.01%.
 3. **Golden files:** factor inputs, percentiles, composite and trade plan for 10 stocks on 2 dates
-   match my hand-scored files exactly (100%).
+   match my hand-scored files exactly (100%). Stocks: NTPC, COALINDIA, HINDALCO, KEC, DATAPATTNS,
+   TITAGARH, INDIANB, CANFINHOME, MFSL, REDINGTON; dates 2024-09-27 and 2025-06-30. A fixture
+   test shows LENSKART excluded by the 200-day history rule while it has fewer than 200 days.
 4. **Factors (PRD stage 2), price-based factors:** for Momentum and Volume/delivery, walk-forward
    within-sector rank IC vs forward returns at each horizon has mean > 0.02 and is positive in at
    least 60% of months; a factor that fails is dropped from the params file. Quality and Valuation
    are reported; they pass the same bar only if filing-date-lagged history covers the window,
-   otherwise they ship labelled "untested".
+   otherwise they ship labelled "untested". Reported growth and Mohanram G are tested on the same
+   bar; Reported growth keeps its weight only if it passes. For 3-month and 6-month forward returns,
+   significance uses non-overlapping windows (or Newey-West errors).
 5. **Backtest (PRD stage 3):** full scan + trade plan, 2019-01 to the start of the locked holdout,
-   point-in-time membership, one signal per stock per window, costs and tax: net of tax beats the
-   Nifty200 Momentum 30 TRI; max drawdown < 25%; Deflated Sharpe > 0. Equal-weight variant reported.
+   point-in-time membership, one signal per stock per window, costs, tax and the fill rules above:
+   for **3 months and 6 months each**, net of tax beats the Nifty200 Momentum 30 TRI; max drawdown
+   < 25%; Deflated Sharpe > 0. 1 month and 10 days are reported, not gated; a horizon that fails is
+   not offered in scans. Equal-weight and early-exit variants reported.
+5b. **Robustness (PRD stage 4), 3 and 6 months:** the top 5 beat at least 90% of 1,000 random
+   5-stock portfolios drawn from the same filtered universe on the same dates; results reported
+   separately for the 2020 crash, the 2021 bull run and the 2024–25 mid-cap correction; the
+   composite beats a naive top 5 by 6-month return; each threshold ±20% leaves pass/fail unchanged.
 6. **Personal validation:** the long-term quality gate passes ≥ 80% of current smallcase holdings
-   (mapped via `name_map`); every stock in the known-bad list is excluded on the dates before its fall.
+   that are Nifty 500 members (37 of 81 on 2026-11-09; the out-of-universe count is reported
+   separately), mapped via `name_map` with every match verified; every stock in the known-bad list is excluded on the dates before its fall.
 7. **No look-ahead:** the future-row tests in every loader and factor pass; the holdout guard test passes.
-8. **Scan end-to-end:** a cross-market 1-month scan on stored data returns ≤ 5 cards, each with
+8. **Scan end-to-end:** a cross-market 3-month scan on stored data returns ≤ 5 cards, each with
    reward:risk ≥ 2.0, quantity within all caps, a rationale that passes the number check, and a
    ledger row; re-running the same request on the same data returns identical cards.
 9. **Prompt parser:** 50 sample prompts match their expected filter sets exactly; unmapped words flagged.
@@ -247,5 +288,6 @@ from an optional manual list and default to none.
    (fundamentals) depend on it. Buy Starter (₹499/month per the PRD, 400 calls/day), or replace
    those sources (NSE index-change notices; company XBRL filings), which is much more work?
 2. Satellite capital and risk per trade (PRD open question) — needed for sizing defaults.
-3. Known-bad cases list and the 10 golden stocks: you provide them (T23, T24).
+3. Known-bad cases list: you provide it (T23). The 10 golden stocks are fixed (gate check 3);
+   Claude builds the hand-scored workbook with every formula visible and you spot-check it.
 4. Sector taxonomy: NSE's industry labels from the Nifty 500 CSV (default), or a coarser grouping?
