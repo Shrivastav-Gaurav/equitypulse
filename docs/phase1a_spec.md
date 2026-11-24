@@ -53,7 +53,7 @@ differ, the PRD wins; raise the difference instead of coding around it.
 
 ```
 config/params/v1.yaml        # horizon weights, ATR multiples, thresholds, caps (versioned)
-config/exclusions.yaml       # SEBI-order and known-bad lists, maintained by hand
+config/exclusions.yaml       # SEBI orders with order dates (applied from the order date), by hand
 src/equitypulse/
   adjust.py                  # read-time split/bonus adjustment
   sources/nse_legacy.py      # pre-UDiFF bhavcopy (before 2024-07-08)
@@ -72,6 +72,7 @@ src/equitypulse/
   research/backtest.py       # walk-forward backtest
   ui/                        # Streamlit app: scan, trade card
 tests/golden/                # hand-scored factor and plan files (from me)
+tests/fixtures/known_bad.yaml # known-bad test cases; never read by the scan or any filter
 ```
 
 ## Database changes (one new migration, T16)
@@ -124,6 +125,14 @@ reason the Scan screen can show.
    fundamentals present for Quality/Valuation, fewer than 2 red flags.
 4. **Operator-pattern flags**: computed from stored data; 2 or more excludes. A flag whose input is
    missing is reported as *not checked*, never as passed.
+   **Forensic red flags** (added 23 Nov 2026) count with the operator flags. Non-financials only:
+   cash conversion (3-year cumulative operating cash flow below 50% of cumulative net profit);
+   working-capital stretch (receivable days or inventory days up more than 30% over 2 years);
+   distress (Altman Z below 1.8 and interest cover below 1.5). All stocks: retail-holding surge
+   (non-institutional public holding up more than 8 points in 12 months). Thresholds are priors;
+   T27 reports each flag's hit rate on the known-bad cases and its false-positive rate on smallcase
+   holdings. Beneish M stays a Quality input, not a flag: its sales-growth term penalises the
+   growth stocks this system is looking for.
 5. **Regime gate** (scan level): Nifty 500 below its 200-day average **and** India VIX above 20 →
    no new 1-month trades; 3-month and 6-month risk per trade halved.
 
@@ -133,7 +142,7 @@ reason the Scan screen can show.
 | --- | --- |
 | Momentum | 1m/3m/6m adjusted return vs sector and vs Nifty 500; Minervini trend template (price > 50 > 150 > 200-day averages, 200-day rising); distance from 52-week high; 20-day breakout on volume |
 | Volume and delivery | Volume vs 20-day average; delivery % vs its 60-day average |
-| Quality | 3–5 year ROCE/ROE, Piotroski F, Beneish M, D/E, pledge. **Lenders** use ROA, NIM, GNPA/NNPA trend, CASA (banks), capital adequacy, credit cost; promoter holding not scored |
+| Quality | 3–5 year ROCE/ROE, Piotroski F, Beneish M (non-financials), D/E, pledge, cash conversion. **Lenders** use ROA, NIM, GNPA/NNPA trend, CASA (banks), capital adequacy, credit cost; promoter holding not scored |
 | Valuation | P/E and EV/EBITDA vs own 5-year median and sector median; penalises only extreme expensiveness |
 | Reported growth | Latest-quarter YoY and QoQ sales and EPS growth; 3-year sales CAGR. Lenders use loan-book and net-interest-income growth. Filing-date-lagged financials only |
 
@@ -275,7 +284,12 @@ End-of-day data cannot show the order of moves inside a day, so the backtest is 
    composite beats a naive top 5 by 6-month return; each threshold ±20% leaves pass/fail unchanged.
 6. **Personal validation:** the long-term quality gate passes ≥ 80% of current smallcase holdings
    that are Nifty 500 members (37 of 81 on 2026-11-09; the out-of-universe count is reported
-   separately), mapped via `name_map` with every match verified; every stock in the known-bad list is excluded on the dates before its fall.
+   separately), mapped via `name_map` with every match verified; known-bad cases (`tests/fixtures/known_bad.yaml`) are run with
+   `config/exclusions.yaml` switched off: no Tier A case (warning signs in the data) appears as a card in
+   the 90 trading days before its event, and the report names the rule that stopped it; no Tier B case
+   (sudden shock) opened in that window loses more than 3% of Satellite capital. Cases outside the
+   point-in-time Nifty 500 are reported, not scored. Each red flag's false-positive rate on in-universe
+   smallcase holdings is reported; a flag excluding more than 20% of them is reviewed before the gate.
 7. **No look-ahead:** the future-row tests in every loader and factor pass; the holdout guard test passes.
 8. **Scan end-to-end:** a cross-market 3-month scan on stored data returns ≤ 5 cards, each with
    reward:risk ≥ 2.0, quantity within all caps, a rationale that passes the number check, and a
@@ -288,6 +302,7 @@ End-of-day data cannot show the order of moves inside a day, so the backtest is 
    (fundamentals) depend on it. Buy Starter (₹499/month per the PRD, 400 calls/day), or replace
    those sources (NSE index-change notices; company XBRL filings), which is much more work?
 2. Satellite capital and risk per trade (PRD open question) — needed for sizing defaults.
-3. Known-bad cases list: you provide it (T23). The 10 golden stocks are fixed (gate check 3);
+3. Known-bad cases: a 16-stock starter set is in `tests/fixtures/known_bad.yaml`; T18 refines event
+   dates from prices and T19 verifies Nifty 500 membership. The 10 golden stocks are fixed (gate check 3);
    Claude builds the hand-scored workbook with every formula visible and you spot-check it.
 4. Sector taxonomy: NSE's industry labels from the Nifty 500 CSV (default), or a coarser grouping?
