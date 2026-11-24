@@ -5,6 +5,12 @@
 #         90 trading days before event_date; the report names the rule that stopped it.
 # tier B: sudden shock -> no trade opened in that window may lose more than 3% of Satellite capital.
 #
+# price_peak_date / fall_pct (added by T18 from NSE prices, split/bonus-adjusted, ISIN chain
+# followed): price_peak_date = highest close in the 120 trading days before event_date;
+# fall_pct = 1 - (lowest close in the 120 trading days from event_date) / that peak, as a
+# fraction (0.94 = fell 94%). GENSOL has only 80 trading days after its event (it stopped
+# trading). event_date itself is unchanged.
+#
 # event_date values are approximate (from news reports); T18 refines each to the first day of the
 # main fall from prices. nifty500_verified is set by T19 from point-in-time membership; an entry
 # that was not a member on event_date is kept but reported as "outside universe".
@@ -14,95 +20,127 @@ cases:
     name: Dewan Housing Finance Corporation
     tier: A
     event_date: 2019-06-04
+    price_peak_date: 2018-12-31
+    fall_pct: 0.936
     signal: Repayment defaults and rating downgrades to default, Jun-Aug 2019; ~80% fall in 2019
     nifty500_verified: false
   - symbol: COFFEEDAY
     name: Coffee Day Enterprises
     tier: A
     event_date: 2019-07-30
+    price_peak_date: 2019-03-18
+    fall_pct: 0.91
     signal: Promoter pledge 57.6% (Dec 2017) to 79.4% (Dec 2018)
     nifty500_verified: false
   - symbol: RELCAPITAL
     name: Reliance Capital
     tier: A
     event_date: 2019-06-01
+    price_peak_date: 2019-01-01
+    fall_pct: 0.944
     signal: Promoter pledge 70% to 83%; group defaults
     nifty500_verified: false
   - symbol: RELINFRA
     name: Reliance Infrastructure
     tier: A
     event_date: 2019-06-01
+    price_peak_date: 2019-01-01
+    fall_pct: 0.941
     signal: Promoter pledge 66.1% to 83.6%
     nifty500_verified: false
   - symbol: CGPOWER
     name: CG Power and Industrial Solutions
     tier: A
     event_date: 2019-08-20
+    price_peak_date: 2019-03-19
+    fall_pct: 0.827
     signal: 100% of promoter holding pledged; irregularities disclosed Aug 2019
     nifty500_verified: false
   - symbol: IBULHSGFIN
     name: Indiabulls Housing Finance (now Sammaan Capital)
     tier: A
     event_date: 2019-09-15
+    price_peak_date: 2019-04-05
+    fall_pct: 0.808
     signal: Fell more than 50% in one month with DHFL, RCap, RInfra (Sep-Oct 2019)
     nifty500_verified: false
   - symbol: MANPASAND
     name: Manpasand Beverages
     tier: A
     event_date: 2019-05-01
+    price_peak_date: 2019-03-13
+    fall_pct: 0.964
     signal: Auditor (Deloitte) resigned citing non-disclosure; -81.8%
     nifty500_verified: false
   - symbol: JETAIRWAYS
     name: Jet Airways (India)
     tier: A
     event_date: 2019-04-17
+    price_peak_date: 2018-11-16
+    fall_pct: 0.951
     signal: Debt defaults, rating downgrades; operations suspended
     nifty500_verified: false
   - symbol: EROSMEDIA
     name: Eros International Media
     tier: A
     event_date: 2019-06-01
+    price_peak_date: 2018-12-13
+    fall_pct: 0.897
     signal: Rating downgrades; fell 50%+ in three weeks (Jun 2019)
     nifty500_verified: false
   - symbol: SINTEX
     name: Sintex Industries
     tier: A
     event_date: 2019-06-01
+    price_peak_date: 2018-12-19
+    fall_pct: 0.95
     signal: Debt stress, rating downgrades; fell 50%+ in three weeks (Jun 2019)
     nifty500_verified: false
   - symbol: ZEEL
     name: Zee Entertainment Enterprises
     tier: A
     event_date: 2019-01-25
+    price_peak_date: 2018-08-08
+    fall_pct: 0.4
     signal: Promoter pledge sell-off; promoters sold almost all their holding to repay debt
     nifty500_verified: false
   - symbol: YESBANK
     name: Yes Bank
     tier: A
     event_date: 2020-03-05
+    price_peak_date: 2019-11-11
+    fall_pct: 0.84
     signal: Rising NPAs, capital shortfall; RBI moratorium and reconstruction
     nifty500_verified: false
   - symbol: BCG
     name: Brightcom Group
     tier: B
     event_date: 2023-08-22
+    price_peak_date: 2023-06-21
+    fall_pct: 0.62
     signal: SEBI interim order against the promoter-chairman and the CFO
     nifty500_verified: false
   - symbol: PAYTM
     name: One97 Communications
     tier: B
     event_date: 2024-01-31
+    price_peak_date: 2023-10-20
+    fall_pct: 0.679
     signal: RBI action on Paytm Payments Bank (from memory, verify)
     nifty500_verified: false
   - symbol: INDUSINDBK
     name: IndusInd Bank
     tier: B
     event_date: 2025-03-11
+    price_peak_date: 2024-09-19
+    fall_pct: 0.571
     signal: Derivatives accounting discrepancy disclosed (from memory, verify)
     nifty500_verified: false
   - symbol: GENSOL
     name: Gensol Engineering
     tier: B
     event_date: 2025-04-15
+    price_peak_date: 2024-11-06
+    fall_pct: 0.96
     signal: SEBI interim order on fund diversion; ~90% fall; retail holding 13.94% to 23.44% in 2024
     nifty500_verified: false   # probably outside the Nifty 500
