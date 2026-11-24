@@ -2,6 +2,7 @@
 
 import datetime as dt
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -128,3 +129,62 @@ def test_refresh_reloads_dates_already_loaded(db_session: Session) -> None:
     result = run_backfill(db_session, CAL, MON, MON, load=reload, refresh=True)
     assert calls == [MON]
     assert result.already_loaded == 0 and result.loaded == 1
+
+
+# ── calendar cross-check ──────────────────────────────────────────────────────
+
+from equitypulse.sources.nse import NseFileMissing  # noqa: E402
+
+HOLIDAY = MON + dt.timedelta(days=2)  # a Wednesday the calendar closes
+_HOL_DAYS = dict(_DAYS) | {HOLIDAY: False}
+CAL_HOL = NseCalendar(_HOL_DAYS)
+
+
+def _checks(session: Session) -> list[DataAudit]:
+    return session.scalars(
+        select(DataAudit).where(DataAudit.job == "calendar_check", DataAudit.status != "STARTED")
+    ).all()
+
+
+def test_price_file_on_a_calendar_holiday_is_a_mismatch(db_session: Session) -> None:
+    _seed_security(db_session)
+    probed: list = []
+
+    def exists(d: dt.date) -> bool:
+        probed.append(d)
+        return True
+
+    result = run_backfill(db_session, CAL_HOL, MON, MON + dt.timedelta(days=6),
+                          load=_ok_loader([]), file_exists=exists)
+    assert probed == [HOLIDAY]  # weekends are not probed
+    assert result.calendar_mismatches == [HOLIDAY]
+    row = _checks(db_session)[0]
+    assert (row.status, row.as_of, row.anomaly_count) == ("DEGRADED", HOLIDAY, 1)
+    assert "holiday" in row.error
+
+
+def test_holiday_without_a_file_is_fine(db_session: Session) -> None:
+    _seed_security(db_session)
+    result = run_backfill(db_session, CAL_HOL, MON, MON + dt.timedelta(days=4),
+                          load=_ok_loader([]), file_exists=lambda _d: False)
+    assert result.calendar_mismatches == [] and _checks(db_session) == []
+
+
+def test_missing_file_on_a_trading_day_is_a_mismatch_not_a_block(db_session: Session) -> None:
+    def load(session, date, **kw):
+        raise NseFileMissing(f"NSE legacy bhavcopy {date} returned HTTP 404")
+
+    result = run_backfill(db_session, CAL, MON, MON + dt.timedelta(days=4), load=load,
+                          file_exists=lambda _d: False)
+    assert result.blocked is False  # 404s are not NSE refusing us
+    assert len(result.calendar_mismatches) == 5
+    assert len(_checks(db_session)) == 5
+    assert "trading day" in _checks(db_session)[0].error
+
+
+def test_cross_check_can_be_switched_off(db_session: Session) -> None:
+    _seed_security(db_session)
+    result = run_backfill(db_session, CAL_HOL, MON, MON + dt.timedelta(days=4),
+                          load=_ok_loader([]), check_calendar=False,
+                          file_exists=lambda _d: pytest.fail("must not probe"))
+    assert result.calendar_mismatches == []

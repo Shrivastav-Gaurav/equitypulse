@@ -4,6 +4,10 @@ Differs from the nightly job on purpose: it never falls back to Tapetide (a bulk
 burn the daily call budget on the first outage), records one audit run per date so every gap
 is explained in `data_audit`, resumes by skipping dates already loaded from NSE, and stops
 when NSE looks like it is blocking us.
+
+It also cross-checks the trading calendar against NSE's files: a calendar trading day with no
+price file (HTTP 404), or a calendar weekday holiday with one, is a `calendar_check` row in
+`data_audit` (DEGRADED). A missing file is never counted as NSE blocking us.
 """
 
 import datetime as dt
@@ -20,9 +24,11 @@ from equitypulse.calendar import NseCalendar
 from equitypulse.db.models import PriceDaily
 from equitypulse.isin_links import ChainUniverse, detect_links
 from equitypulse.prices import SOURCE_NSE, load_bhavcopy
-from equitypulse.sources.nse import NseFetchError
+from equitypulse.sources.nse import NseFetchError, NseFileMissing
+from equitypulse.sources.nse_legacy import price_file_exists
 
 JOB = "prices"
+CHECK_JOB = "calendar_check"
 
 
 class BackfillResult(BaseModel):
@@ -33,6 +39,7 @@ class BackfillResult(BaseModel):
     failed: list[dt.date] = Field(default_factory=list)
     blocked: bool = False
     isin_links_added: int = 0
+    calendar_mismatches: list[dt.date] = Field(default_factory=list)
 
 
 def run_backfill(
@@ -47,6 +54,8 @@ def run_backfill(
     sleep: Callable[[float], None] = time.sleep,
     max_consecutive_fetch_failures: int = 3,
     refresh: bool = False,
+    check_calendar: bool = True,
+    file_exists: Callable[[dt.date], bool] = price_file_exists,
     progress: Callable[[str], None] = lambda _msg: None,
 ) -> BackfillResult:
     """Load every trading day in [from_date, to_date], committing after each date.
@@ -60,6 +69,9 @@ def run_backfill(
     while date <= to_date:
         if not calendar.is_trading_day(date):
             result.skipped_non_trading += 1
+            if check_calendar and date.weekday() < 5 and file_exists(date):
+                _mismatch(session, result, date, "price file exists on a calendar holiday")
+                progress(f"{date} CALENDAR MISMATCH: price file on a holiday")
             date += dt.timedelta(days=1)
             continue
 
@@ -94,7 +106,9 @@ def run_backfill(
             session.commit()
             result.failed.append(date)
             progress(f"{date} FAILED {type(exc).__name__}: {str(exc)[:120]}")
-            if isinstance(exc, NseFetchError):
+            if isinstance(exc, NseFileMissing):
+                _mismatch(session, result, date, f"no file on a calendar trading day: {exc}")
+            elif isinstance(exc, NseFetchError):
                 consecutive_fetch_failures += 1
                 if consecutive_fetch_failures >= max_consecutive_fetch_failures:
                     result.blocked = True
@@ -108,3 +122,14 @@ def run_backfill(
     result.isin_links_added = detect_links(session)
     session.commit()
     return result
+
+
+def _mismatch(session: Session, result: BackfillResult, date: dt.date, why: str) -> None:
+    run_id = new_run_id()
+    begin_audit(session, run_id=run_id, job=CHECK_JOB, source=SOURCE_NSE, as_of=date)
+    finish_audit(
+        session, run_id=run_id, job=CHECK_JOB, source=SOURCE_NSE, status="DEGRADED",
+        anomaly_count=1, error=why[:500],
+    )
+    session.commit()
+    result.calendar_mismatches.append(date)

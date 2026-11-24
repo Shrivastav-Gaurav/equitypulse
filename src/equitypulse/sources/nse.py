@@ -32,6 +32,10 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 NSE_HOLIDAY_MASTER_URL = "https://www.nseindia.com/api/holiday-master"
+# Since Nov 2026 NSE answers 301 to the same path on www.nseindia.in (NSE-registered since
+# 2017, same name servers). Redirects are followed only to these hosts, on this path.
+HOLIDAY_MASTER_HOSTS = frozenset({"www.nseindia.com", "www.nseindia.in"})
+_MAX_REDIRECTS = 3
 EQUITY_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 EQUITY_SEGMENT = "CM"
 _ISIN_RE = re.compile(r"^IN[A-Z0-9]{10}$")
@@ -52,6 +56,10 @@ _SESSION_PATTERN = re.compile(r"live trading|muhurat", re.IGNORECASE)
 
 class NseFetchError(RuntimeError):
     """NSE could not be reached or refused the request."""
+
+
+class NseFileMissing(NseFetchError):
+    """NSE answered 404: the file does not exist (a holiday, or not published)."""
 
 
 class NseFormatError(ValueError):
@@ -83,7 +91,7 @@ def fetch_holiday_master(
         last_problem = ""
         for attempt in range(1, attempts + 1):
             try:
-                response = http.get(NSE_HOLIDAY_MASTER_URL, params=params, headers=BROWSER_HEADERS)
+                response = _get_holiday_master(http, params)
             except httpx.TransportError as exc:
                 last_problem = f"network error: {exc.__class__.__name__}"
             else:
@@ -101,6 +109,24 @@ def fetch_holiday_master(
     finally:
         if own_client:
             http.close()
+
+
+def _get_holiday_master(http: httpx.Client, params: dict[str, str]) -> httpx.Response:
+    """GET the holiday master, following redirects only within HOLIDAY_MASTER_HOSTS."""
+    url = httpx.URL(NSE_HOLIDAY_MASTER_URL, params=params)
+    path = url.path
+    for _ in range(_MAX_REDIRECTS + 1):
+        response = http.get(url, headers=BROWSER_HEADERS, follow_redirects=False)
+        if not response.is_redirect:
+            return response
+        target = url.join(response.headers.get("location", ""))
+        allowed = target.host in HOLIDAY_MASTER_HOSTS and target.path == path
+        if target.scheme != "https" or not allowed:
+            raise NseFetchError(
+                f"NSE holiday-master redirected to an unexpected address: {target}"
+            )
+        url = target
+    raise NseFetchError(f"NSE holiday-master redirected more than {_MAX_REDIRECTS} times")
 
 
 class EquityRow(BaseModel):
@@ -297,6 +323,8 @@ def _fetch_with_retry(
             else:
                 if response.status_code == 200:
                     return response
+                if response.status_code == 404:
+                    raise NseFileMissing(f"NSE {label} returned HTTP 404")
                 if response.status_code not in RETRYABLE_STATUS:
                     raise NseFetchError(f"NSE {label} returned HTTP {response.status_code}")
                 last_problem = f"HTTP {response.status_code}"

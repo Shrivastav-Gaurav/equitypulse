@@ -1,10 +1,10 @@
 """Nightly ingest orchestrator.
 
-Order: calendar check → equity master → bhavcopy → surveillance (ASM/GSM/ESM).
+Order: calendar check → equity master → bhavcopy → corporate actions → surveillance.
 Each step is wrapped in AuditContext so failures are recorded without crashing
 subsequent steps.
 
-Injectable stubs (`fetch_master`, `fetch_bhavcopy`, `fetch_surveillance`) allow
+Injectable stubs (`fetch_master`, `fetch_bhavcopy`, `fetch_actions`, `fetch_surveillance`) allow
 tests to run without touching any network or external DB.
 """
 
@@ -17,12 +17,17 @@ from sqlalchemy.orm import Session
 
 from equitypulse.audit import AuditContext, new_run_id
 from equitypulse.calendar import NseCalendar, today_ist
+from equitypulse.corporate_actions_nse import load_nse_corporate_actions
 from equitypulse.isin_links import detect_links
 from equitypulse.master import SOURCE as MASTER_SOURCE
 from equitypulse.master import load_equity_master
 from equitypulse.prices import load_bhavcopy
+from equitypulse.sources.nse_actions import SOURCE_ACTIONS, fetch_corporate_actions
 from equitypulse.sources.surveillance import SOURCE as SURVEILLANCE_SOURCE
 from equitypulse.surveillance_load import load_surveillance
+
+ACTIONS_LOOKBACK = dt.timedelta(days=14)
+ACTIONS_LOOKAHEAD = dt.timedelta(days=30)
 
 
 class NightlyResult(BaseModel):
@@ -31,6 +36,7 @@ class NightlyResult(BaseModel):
     master_rows: int = 0
     bhavcopy_rows: int = 0
     surveillance_rows: int = 0
+    corporate_actions_added: int = 0
     isin_links_added: int = 0
     degraded: bool = False
 
@@ -43,6 +49,7 @@ def run_nightly(
     fetch_master: Callable[..., Any] | None = None,
     fetch_bhavcopy: Callable[..., Any] | None = None,
     fetch_surveillance: Callable[..., Any] | None = None,
+    fetch_actions: Callable[[dt.date, dt.date], list[Any]] = fetch_corporate_actions,
 ) -> NightlyResult:
     """Run all nightly ingest steps for `date`.
 
@@ -84,6 +91,23 @@ def run_nightly(
         if degraded:
             result.degraded = True
         result.isin_links_added = detect_links(session)
+
+    # ── corporate actions ────────────────────────────────────────────────────
+    # Ex-dates from two weeks back (late additions) to a month ahead (announced early).
+    # Storing a future ex-date is safe: adjustment only reads ex_date <= the day computed.
+    with AuditContext(
+        session, run_id=run_id, job="corporate_actions", source=SOURCE_ACTIONS, as_of=date,
+        now=now,
+    ) as ctx:
+        actions = load_nse_corporate_actions(
+            session, date - ACTIONS_LOOKBACK, date + ACTIONS_LOOKAHEAD, fetch=fetch_actions,
+            now=now,
+        )
+        result.corporate_actions_added = actions.inserted
+        ctx.rows_in = actions.rows_in
+        ctx.rows_written = actions.inserted
+        ctx.anomaly_count = actions.unparsed
+        ctx.degraded = actions.unparsed > 0
 
     # ── surveillance ─────────────────────────────────────────────────────────
     surv_fn = fetch_surveillance if fetch_surveillance is not None else load_surveillance

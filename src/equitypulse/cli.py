@@ -88,12 +88,15 @@ def backfill(
     typer.echo(
         f"Backfill: loaded {result.loaded} dates ({result.rows_written} rows), "
         f"already loaded {result.already_loaded}, failed {len(result.failed)}, "
-        f"ISIN changes linked {result.isin_links_added}"
+        f"ISIN changes linked {result.isin_links_added}, "
+        f"calendar mismatches {len(result.calendar_mismatches)}"
     )
+    for d in result.calendar_mismatches:
+        typer.echo(f"  calendar mismatch {d} (see data_audit job calendar_check)", err=True)
     if result.blocked:
         typer.echo("STOPPED: NSE refused repeated downloads; it may be blocking us.", err=True)
         raise typer.Exit(2)
-    if result.failed:
+    if result.failed or result.calendar_mismatches:
         raise typer.Exit(1)
 
 

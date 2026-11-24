@@ -118,3 +118,53 @@ def test_fetch_rejects_non_json() -> None:
     respx.get(NSE_HOLIDAY_MASTER_URL).mock(return_value=httpx.Response(200, text="<html>"))
     with pytest.raises(NseFetchError, match="JSON"):
         fetch_holiday_master(2026, sleep=no_sleep)
+
+
+# --- redirect to www.nseindia.in (since Nov 2026) -----------------------------------------
+
+_IN_URL = "https://www.nseindia.in/api/holiday-master"
+_LOCATION = "https://www.nseindia.in/api/holiday-master?type=trading&year=2021"
+
+
+@respx.mock
+def test_fetch_follows_nses_redirect_to_nseindia_in() -> None:
+    """Recorded: www.nseindia.com answers 301 to the same path on www.nseindia.in."""
+    payload = load_json_fixture("nse/holiday_master_trading_2021.json")
+    com = respx.get(NSE_HOLIDAY_MASTER_URL).mock(
+        return_value=httpx.Response(301, headers={"location": _LOCATION})
+    )
+    dot_in = respx.get(_IN_URL).mock(return_value=httpx.Response(200, json=payload))
+    assert fetch_holiday_master(2021, sleep=no_sleep) == payload
+    assert com.call_count == 1 and dot_in.call_count == 1
+    assert dot_in.calls.last.request.url.params["year"] == "2021"
+    assert len(parse_trading_holidays(payload, 2021)) == 18
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://www.nseindia.evil.example/api/holiday-master?type=trading&year=2021",
+        "https://nseindia.in/api/holiday-master?type=trading&year=2021",  # bare host: not allowed
+        "https://www.nseindia.in/api/other?type=trading&year=2021",
+        "http://www.nseindia.in/api/holiday-master?type=trading&year=2021",
+    ],
+)
+@respx.mock
+def test_fetch_refuses_a_redirect_anywhere_else(location: str) -> None:
+    respx.get(NSE_HOLIDAY_MASTER_URL).mock(
+        return_value=httpx.Response(301, headers={"location": location})
+    )
+    with pytest.raises(NseFetchError, match="unexpected address"):
+        fetch_holiday_master(2021, sleep=no_sleep)
+
+
+@respx.mock
+def test_fetch_refuses_a_redirect_loop() -> None:
+    respx.get(NSE_HOLIDAY_MASTER_URL).mock(
+        return_value=httpx.Response(301, headers={"location": _LOCATION})
+    )
+    respx.get(_IN_URL).mock(
+        return_value=httpx.Response(301, headers={"location": NSE_HOLIDAY_MASTER_URL})
+    )
+    with pytest.raises(NseFetchError, match="more than"):
+        fetch_holiday_master(2021, sleep=no_sleep)

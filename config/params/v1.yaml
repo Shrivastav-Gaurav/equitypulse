@@ -14,8 +14,8 @@ factors:
   not_yet_scored: [earnings_revisions, flows]     # Phase 1b, forward-only
   reported_growth_share_of_earnings: 0.5
   # PRD v2 starting weights, six factors. earnings_momentum = reported growth + analyst
-  # revisions and result surprise. The 6m row is inferred from the spec's 6m column (the only
-  # solution with flows at 15, as in the other horizons): confirm it against the PRD.
+  # revisions and result surprise. All four rows, including 6m (Mom 20, Vol 0, Earn 25,
+  # Qual 25, Val 15, Flows 15), are from PRD v2 "Signal engine v2 - Step 3 - Horizon weights".
   prior_weights:
     1m:  {momentum: 35, volume_delivery: 15, earnings_momentum: 20, quality: 10, valuation: 5, flows: 15}
     3m:  {momentum: 25, volume_delivery: 5, earnings_momentum: 25, quality: 20, valuation: 10, flows: 15}

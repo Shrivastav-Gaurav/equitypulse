@@ -27,6 +27,7 @@ from equitypulse.master import ensure_security, symbol_as_of
 from equitypulse.snapshots import store_snapshot
 from equitypulse.sources.nse import (
     NseFetchError,
+    NseFileMissing,
     fetch_bhavcopy_delivery,
     fetch_bhavcopy_udiff,
     parse_bhavcopy_delivery,
@@ -35,6 +36,14 @@ from equitypulse.sources.nse import (
 
 SOURCE_NSE = "NSE_BHAVCOPY"
 SOURCE_TAPETIDE = "TAPETIDE_BHAVCOPY"
+from equitypulse.sources.nse_legacy import (  # noqa: E402
+    UDIFF_START,
+    fetch_legacy_bhavcopy,
+    fetch_mto,
+    parse_legacy_bhavcopy,
+    parse_mto,
+)
+
 log = logging.getLogger(__name__)
 _MAX_CONSECUTIVE_FAILURES = 3
 
@@ -162,6 +171,8 @@ def load_bhavcopy(
     *,
     fetch_udiff: Callable[[dt.date], str] = fetch_bhavcopy_udiff,
     fetch_delivery: Callable[[dt.date], str] = fetch_bhavcopy_delivery,
+    fetch_legacy: Callable[[dt.date], str] = fetch_legacy_bhavcopy,
+    fetch_mto: Callable[[dt.date], str] = fetch_mto,
     now: dt.datetime | None = None,
     tapetide_caller: Any = None,  # injectable for tests; None = use real MCP
     allow_fallback: bool = True,
@@ -176,13 +187,25 @@ def load_bhavcopy(
     Tapetide budget). `universe`, if given, restricts the load: a set keeps exactly those
     ISINs; a ChainUniverse also keeps a member's earlier ISINs (see isin_links).
 
+    Dates before UDIFF_START read the legacy bhavcopy, with delivery from `sec_bhavdata_full`
+    where it exists and the MTO delivery-position file where it does not.
+
     Does not commit; the caller owns the transaction.
     """
     if universe is not None and not isinstance(universe, ChainUniverse):
         universe = ChainUniverse.strict(universe)
+    legacy = date < UDIFF_START
+    delivery_file = "sec_bhavdata_full"
     try:
-        udiff_text = fetch_udiff(date)
-        delivery_text = fetch_delivery(date)
+        if legacy:
+            price_text = fetch_legacy(date)
+            try:
+                delivery_text = fetch_delivery(date)
+            except NseFileMissing:
+                delivery_text, delivery_file = fetch_mto(date), "MTO"
+        else:
+            price_text = fetch_udiff(date)
+            delivery_text = fetch_delivery(date)
     except NseFetchError as exc:
         if not allow_fallback:
             raise
@@ -192,18 +215,26 @@ def load_bhavcopy(
             universe=set(universe.isins) if universe is not None else None,
         )
 
-    udiff_rows = parse_bhavcopy_udiff(udiff_text)
+    if legacy:
+        udiff_rows = parse_legacy_bhavcopy(price_text, date)
+        delivery = (
+            parse_mto(delivery_text, date)
+            if delivery_file == "MTO"
+            else parse_bhavcopy_delivery(delivery_text)
+        )
+    else:
+        udiff_rows = parse_bhavcopy_udiff(price_text)
+        delivery = parse_bhavcopy_delivery(delivery_text)
     if universe is not None:
         udiff_rows = [r for r in udiff_rows if universe.keeps(r.isin, r.symbol)]
-    delivery = parse_bhavcopy_delivery(delivery_text)
 
     store_snapshot(
         session,
         source="NSE",
-        endpoint="bhavcopy-udiff",
+        endpoint="bhavcopy-legacy" if legacy else "bhavcopy-udiff",
         entity=date.isoformat(),
         as_of=date,
-        payload={"date": date.isoformat(), "rows": len(udiff_rows)},
+        payload={"date": date.isoformat(), "rows": len(udiff_rows), "delivery": delivery_file},
         fetched_at=now,
     )
 

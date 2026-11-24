@@ -46,6 +46,7 @@ def _make_stubs(*, bhavcopy_rows=5, master_rows=10):
         fetch_master=stub_master,
         fetch_bhavcopy=stub_bhavcopy,
         fetch_surveillance=stub_surveillance,
+        fetch_actions=lambda _start, _end: [],
     )
 
 
@@ -110,4 +111,30 @@ def test_nightly_audits_under_the_loaders_source_names(db_session: Session) -> N
     _seed_calendar(db_session)
     run_nightly(db_session, date=DATE, now=_NOW, **_make_stubs())
     sources = {r.source for r in db_session.scalars(select(DataAudit))}
-    assert sources == {"NSE_EQUITY_L", "NSE_BHAVCOPY", "NSE_REG_IND"}
+    assert sources == {"NSE_EQUITY_L", "NSE_BHAVCOPY", "NSE_CORP_ACTIONS", "NSE_REG_IND"}
+
+
+def test_nightly_loads_corporate_actions_idempotently(db_session: Session) -> None:
+    import json
+
+    from equitypulse.db.models import CorporateAction, Security
+    from tests.conftest import FIXTURES
+
+    rows = json.loads((FIXTURES / "nse" / "corporate_actions_sample.json").read_text("utf-8"))
+    _seed_calendar(db_session)
+    db_session.add(Security(isin="INE154A01025", symbol="ITC", name="ITC", status="ACTIVE",
+                            source="T", as_of=DATE))
+    db_session.flush()
+    windows: list = []
+
+    def fetch(start: dt.date, end: dt.date) -> list:
+        windows.append((start, end))
+        return rows
+
+    stubs = _make_stubs() | {"fetch_actions": fetch}
+    first = run_nightly(db_session, date=DATE, now=_NOW, **stubs)
+    second = run_nightly(db_session, date=DATE, now=_NOW, **stubs)
+    assert first.corporate_actions_added == 1  # ITC's demerger; the rest are not our stocks
+    assert second.corporate_actions_added == 0
+    assert db_session.query(CorporateAction).count() == 1
+    assert windows[0] == (DATE - dt.timedelta(days=14), DATE + dt.timedelta(days=30))
