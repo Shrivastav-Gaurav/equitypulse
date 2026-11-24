@@ -21,26 +21,38 @@ D = dt.date(2026, 1, 1)
 @pytest.mark.parametrize(
     ("subject", "expected"),
     [
-        ("Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share", ("SPLIT", 0.2)),
-        ("Face Value Split (Sub-Division) - From Rs 5/- Per Share To Re 1/- Per Share", ("SPLIT", 0.2)),
-        ("Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share", ("SPLIT", 10.0)),
-        ("Bonus 1:10", ("BONUS", 10 / 11)),
-        ("Bonus 4:1", ("BONUS", 1 / 5)),
-        ("Bonus 1:1", ("BONUS", 0.5)),
-        ("Rights 5:41 @ Premium Rs 109/-", ("RIGHTS", None)),
-        ("Demerger", ("DEMERGER", None)),
-        ("Scheme Of Arrangement - Bonus Ncrps 4:1", ("OTHER", None)),  # preference shares
-        ("Bonus 1:1 And Face Value Split Of Rs 10 To Rs 5", ("OTHER", None)),  # unknown shape
-        ("Interim Dividend - Rs 2 Per Share", None),
-        ("Buy Back", None),
+        ("Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share", [("SPLIT", 0.2)]),
+        ("Face Value Split (Sub-Division) - From Rs 5/- Per Share To Re 1/- Per Share", [("SPLIT", 0.2)]),
+        ("Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share", [("SPLIT", 10.0)]),
+        ("Bonus 1:10", [("BONUS", 10 / 11)]),
+        ("Bonus 4:1", [("BONUS", 1 / 5)]),
+        ("Bonus 1:1", [("BONUS", 0.5)]),
+        ("Rights 5:41 @ Premium Rs 109/-", [("RIGHTS", None)]),
+        ("Demerger", [("DEMERGER", None)]),
+        ("Scheme Of Arrangement - Bonus Ncrps 4:1", [("OTHER", None)]),  # preference shares
+        ("Interim Dividend - Rs 2 Per Share", []),
+        ("Buy Back", []),
+        # Variants recorded from 2018-2024 NSE records:
+        (" Bonus 1:1 /Dividend- Rs 29 Per Share", [("BONUS", 0.5)]),  # TCS 2018
+        (" Bonus 1:2/Face Value Split (Sub-Division) From Rs 2/- Per Share To Re 1/- Per Share",
+         [("BONUS", 2 / 3), ("SPLIT", 0.5)]),  # AVANTIFEED 2018: two actions in one record
+        (" Face Value Split (Sub-Division) - From Rs 10 /- Per Share To Rs 2/- Per Share",
+         [("SPLIT", 0.2)]),  # ZENSARTECH 2018
+        ("Face Value Split (Sub-Division) - From Rs10/- Per Share To Re 1/- Per Share",
+         [("SPLIT", 0.1)]),  # NESTLEIND 2024
+        ("Bonus- 1:2", [("BONUS", 2 / 3)]),  # AJANTPHARM 2022
+        ("Bonus 1: 1", [("BONUS", 0.5)]),
+        (" Scheme Of Arangement- Bonus - 1 Debenture For 1 Equity Share Held",
+         [("OTHER", None)]),  # BRITANNIA: a debenture, not shares
+        ("Bonus Ncrps 1:116", [("OTHER", None)]),
+        ("Bonus 1:1 And Face Value Split Of Rs 10 To Rs 5", [("OTHER", None)]),  # unknown shape
     ],
 )
 def test_parse_subject(subject: str, expected) -> None:
     got = parse_subject(subject)
-    if expected is None or expected[1] is None:
-        assert got == expected
-    else:
-        assert got[0] == expected[0] and got[1] == pytest.approx(expected[1])
+    assert [kind for kind, _f in got] == [kind for kind, _f in expected]
+    for (_k, f_got), (_k2, f_exp) in zip(got, expected, strict=True):
+        assert f_got == (pytest.approx(f_exp) if f_exp is not None else None)
 
 
 def test_parse_fixture_keeps_share_changes_and_flags_and_skips_dividends() -> None:

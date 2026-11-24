@@ -3,10 +3,12 @@
 
 Prices: content/historical/EQUITIES/{YYYY}/{MON}/cm{DD}{MON}{YYYY}bhav.csv.zip
   SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,
-  (TIMESTAMP is DD-MON-YYYY; a trailing comma gives an empty last column; ISIN present since 2019.)
+  (TIMESTAMP is DD-MON-YYYY, or DD-Mon-YY in some 2020 files; a trailing comma gives an
+  empty last column; ISIN present since 2019.)
 Delivery: `sec_bhavdata_full` where it exists (it is missing for 2019); otherwise the
   security-wise delivery position file archives/equities/mto/MTO_{DDMMYYYY}.DAT:
-    4 header lines (the third holds "Trade Date <02-JAN-2019>"), then rows
+    4 header lines (the second, "10,MTO,DDMMYYYY,...", carries the date; the third repeats it
+    as "Trade Date <02-JAN-2019>", misspelt "rade Date" in some files), then rows
     20,<sr no>,<symbol>,<series>,<qty traded>,<deliverable qty>,<% deliverable>
   It covers the rolling settlement only. BE/BZ rows get no delivery figure from either file
   (sec_bhavdata_full prints "-" for them), so their delivery is left empty, never guessed.
@@ -30,7 +32,8 @@ from equitypulse.sources.nse import (
 
 UDIFF_START = dt.date(2024, 7, 8)  # first date the price loader reads the UDiFF file
 _ISIN_RE = re.compile(r"^IN[A-Z0-9]{10}$")
-_TRADE_DATE = re.compile(r"Trade Date <(\d{2}-[A-Z]{3}-\d{4})>")
+_TRADE_DATE = re.compile(r"T?rade Date <(\d{2}-[A-Z]{3}-\d{4})>")  # NSE sometimes drops the T
+_RECORD_10 = re.compile(r"^10,MTO,(\d{8}),")
 _REQUIRED = {"SYMBOL", "SERIES", "OPEN", "HIGH", "LOW", "CLOSE", "PREVCLOSE", "TOTTRDQTY",
              "TOTTRDVAL", "TIMESTAMP", "ISIN"}
 
@@ -63,6 +66,16 @@ def fetch_mto(date: dt.date) -> str:
     return _fetch_with_retry(MTO_URL(date), label=f"MTO delivery {date}").text
 
 
+def _legacy_date(raw: str) -> dt.date:
+    """TIMESTAMP is usually 02-JAN-2019; some files (e.g. 2020-07-13) write 13-Jul-20."""
+    for fmt in ("%d-%b-%Y", "%d-%b-%y"):
+        try:
+            return dt.datetime.strptime(raw.title(), fmt).date()
+        except ValueError:
+            continue
+    raise NseFormatError(f"legacy bhavcopy bad TIMESTAMP {raw!r}")
+
+
 def parse_legacy_bhavcopy(text: str, expected_date: dt.date) -> list[UDiffRow]:
     """PRICE_SERIES rows (EQ/BE/BZ), one per ISIN, EQ winning if an ISIN is in two series."""
     reader = csv.DictReader(io.StringIO(text.strip().lstrip("﻿")))
@@ -78,10 +91,7 @@ def parse_legacy_bhavcopy(text: str, expected_date: dt.date) -> list[UDiffRow]:
         isin = row["ISIN"]
         if not _ISIN_RE.match(isin):
             raise NseFormatError(f"legacy bhavcopy invalid ISIN: {isin!r}")
-        try:
-            date = dt.datetime.strptime(row["TIMESTAMP"].title(), "%d-%b-%Y").date()
-        except ValueError:
-            raise NseFormatError(f"legacy bhavcopy bad TIMESTAMP {row['TIMESTAMP']!r}") from None
+        date = _legacy_date(row["TIMESTAMP"])
         if date != expected_date:
             raise NseFormatError(f"legacy bhavcopy for {expected_date} has rows dated {date}")
         prior = by_isin.get(isin)
@@ -106,13 +116,20 @@ def parse_legacy_bhavcopy(text: str, expected_date: dt.date) -> list[UDiffRow]:
     return list(by_isin.values())
 
 
+def _mto_date(header: list[str]) -> dt.date:
+    for line in header:
+        if m := _RECORD_10.match(line.strip()):
+            return dt.datetime.strptime(m.group(1), "%d%m%Y").date()
+    for line in header:
+        if m := _TRADE_DATE.search(line):
+            return dt.datetime.strptime(m.group(1).title(), "%d-%b-%Y").date()
+    raise NseFormatError("MTO file has no date header")
+
+
 def parse_mto(text: str, expected_date: dt.date) -> dict[tuple[str, str], DeliveryRow]:
     """Delivery keyed by (symbol, series), like parse_bhavcopy_delivery."""
     lines = text.strip().splitlines()
-    m = next((_TRADE_DATE.search(ln) for ln in lines[:5] if _TRADE_DATE.search(ln)), None)
-    if m is None:
-        raise NseFormatError("MTO file has no 'Trade Date <...>' header")
-    trade_date = dt.datetime.strptime(m.group(1).title(), "%d-%b-%Y").date()
+    trade_date = _mto_date(lines[:5])
     if trade_date != expected_date:
         raise NseFormatError(f"MTO file for {expected_date} is dated {trade_date}")
     out: dict[tuple[str, str], DeliveryRow] = {}

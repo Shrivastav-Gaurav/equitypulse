@@ -66,6 +66,10 @@ class NseFormatError(ValueError):
     """NSE answered, but not with what we expect; never guess around it."""
 
 
+class NseNotCsv(NseFormatError):
+    """A .csv URL served something else (e.g. sec_bhavdata_full_08082022.csv is an Excel file)."""
+
+
 class NseHoliday(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -380,12 +384,14 @@ def fetch_bhavcopy_delivery(
     backoff_seconds: float = 2.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    """CSV text of sec_bhavdata_full for `date`."""
+    """CSV text of sec_bhavdata_full for `date`. Raises NseNotCsv for a zip/xlsx body."""
     url = BHAVCOPY_DELIVERY_URL(date)
     response = _fetch_with_retry(
         url, client=client, attempts=attempts, backoff_seconds=backoff_seconds,
         sleep=sleep, label=f"delivery bhavcopy {date}"
     )
+    if response.content[:2] == b"PK":
+        raise NseNotCsv(f"sec_bhavdata_full for {date} is a zip/xlsx file, not CSV")
     return response.text
 
 
@@ -457,11 +463,16 @@ def parse_bhavcopy_delivery(text: str) -> dict[tuple[str, str], DeliveryRow]:
     text = text.strip()
     if not text:
         raise NseFormatError("sec_bhavdata_full CSV is empty")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(text.replace("\r\n", "\n").replace("\r", "\n")))
     if reader.fieldnames is None:
         raise NseFormatError("sec_bhavdata_full has no headers")
+    fields = {f.strip() for f in reader.fieldnames if f}
+    if missing := {"SYMBOL", "SERIES", "DELIV_QTY", "DELIV_PER"} - fields:
+        raise NseFormatError(f"sec_bhavdata_full missing columns: {sorted(missing)}")
     result: dict[tuple[str, str], DeliveryRow] = {}
     for raw in reader:
+        if None in raw or None in raw.values():
+            raise NseFormatError("sec_bhavdata_full has a row with the wrong number of fields")
         row = {k.strip(): v.strip() for k, v in raw.items()}
         series = row.get("SERIES", "")
         if series not in PRICE_SERIES:

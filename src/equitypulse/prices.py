@@ -28,6 +28,7 @@ from equitypulse.snapshots import store_snapshot
 from equitypulse.sources.nse import (
     NseFetchError,
     NseFileMissing,
+    NseNotCsv,
     fetch_bhavcopy_delivery,
     fetch_bhavcopy_udiff,
     parse_bhavcopy_delivery,
@@ -203,6 +204,8 @@ def load_bhavcopy(
                 delivery_text = fetch_delivery(date)
             except NseFileMissing:
                 delivery_text, delivery_file = fetch_mto(date), "MTO"
+            except NseNotCsv:
+                delivery_text, delivery_file = fetch_mto(date), "MTO (full file not CSV)"
         else:
             price_text = fetch_udiff(date)
             delivery_text = fetch_delivery(date)
@@ -219,7 +222,7 @@ def load_bhavcopy(
         udiff_rows = parse_legacy_bhavcopy(price_text, date)
         delivery = (
             parse_mto(delivery_text, date)
-            if delivery_file == "MTO"
+            if delivery_file.startswith("MTO")
             else parse_bhavcopy_delivery(delivery_text)
         )
     else:

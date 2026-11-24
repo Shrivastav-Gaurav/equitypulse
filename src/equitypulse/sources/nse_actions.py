@@ -9,7 +9,8 @@ symbol, isin, series, exDate ("14-Jan-2026"), subject. Two quirks matter:
     INE237A01010, neither of the two ISINs that traded around it).
 So actions are resolved to ISINs by issuer code and symbol, not by the `isin` field.
 
-Only these subject shapes change the share count of the equity and carry a factor:
+Only these subject shapes change the share count of the equity and carry a factor (after
+normalising spacing, and splitting combined records such as "Bonus 1:2/Face Value Split ..."):
   "Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share"
   "Consolidation Of Equity Shares From Re 1 Per Share To Rs 10 Per Share"
   "Bonus 1:10"
@@ -45,7 +46,7 @@ ACTIONS_URL = (
 SYMBOL_CHANGES_URL = "https://nsearchives.nseindia.com/content/equities/symbolchange.csv"
 
 _FACE_VALUE = re.compile(
-    r"^(?:Face Value Split \(Sub-Division\) -|Consolidation Of Equity Shares)"
+    r"^(?:Face Value Split \(Sub-Division\)(?: -)?|Consolidation Of Equity Shares)"
     r" From R[se] ([\d.]+)(?:/-)? Per Share To R[se] ([\d.]+)(?:/-)? Per Share$",
     re.IGNORECASE,
 )
@@ -73,14 +74,34 @@ class SymbolChange(BaseModel):
     effective: dt.date
 
 
-def parse_subject(subject: str) -> tuple[str, float | None] | None:
-    """(action_type, factor) for actions we keep; None for ones we skip (dividends etc.).
+def _normalise(subject: str) -> str:
+    """Spacing and punctuation variants seen in 2018-2024 records, nothing else:
+    "Rs10/-" and "Rs 10 /-" -> "Rs 10/-"; "Bonus- 1:2" and "Bonus 1: 1" -> "Bonus 1:2"."""
+    s = " ".join(subject.split())
+    s = re.sub(r"\s*/\s*-", "/-", s)
+    s = re.sub(r"\bR([se])\.?\s*(?=\d)", r"R\1 ", s)
+    s = re.sub(r"^Bonus\s*-\s*(?=\d)", "Bonus ", s, flags=re.IGNORECASE)
+    return re.sub(r"(\d+)\s*:\s*(\d+)", r"\1:\2", s)
 
+
+def parse_subject(subject: str) -> list[tuple[str, float | None]]:
+    """Every action in a subject; [] when nothing is kept (dividends etc.).
+
+    One record can hold several actions separated by "/" ("Bonus 1:2/Face Value Split ...",
+    "Bonus 1:1 /Dividend- Rs 29 Per Share"); a "/-" is part of an amount, not a separator.
     A face-value change from F_old to F_new multiplies the share count by F_old / F_new, so
     earlier prices are multiplied by F_new / F_old (a consolidation gives a factor above 1).
     A bonus of a new shares for every b held multiplies prices by b / (a + b).
     """
-    s = " ".join(subject.split())
+    out = []
+    for part in re.split(r"/(?!-)", _normalise(subject)):
+        parsed = _parse_one(part.strip())
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
+def _parse_one(s: str) -> tuple[str, float | None] | None:
     if m := _FACE_VALUE.match(s):
         old, new = float(m.group(1)), float(m.group(2))
         if old <= 0 or new <= 0 or old == new:
@@ -113,19 +134,16 @@ def parse_corporate_actions(rows: list[dict[str, Any]]) -> tuple[list[ParsedActi
         except KeyError as exc:
             raise NseFormatError(f"corporate action row missing {exc}") from exc
         parsed = parse_subject(subject)
-        if parsed is None:
-            skipped += 1
-            continue
-        if ex_raw in ("", "-"):
+        if not parsed or ex_raw in ("", "-"):
             skipped += 1
             continue
         try:
             ex_date = dt.datetime.strptime(ex_raw, "%d-%b-%Y").date()
         except ValueError as exc:
             raise NseFormatError(f"corporate action bad exDate {ex_raw!r}") from exc
-        action_type, factor = parsed
-        out.append(ParsedAction(symbol=symbol, isin=isin, ex_date=ex_date,
-                                action_type=action_type, adj_factor=factor, subject=subject))
+        for action_type, factor in parsed:
+            out.append(ParsedAction(symbol=symbol, isin=isin, ex_date=ex_date,
+                                    action_type=action_type, adj_factor=factor, subject=subject))
     return out, skipped
 
 

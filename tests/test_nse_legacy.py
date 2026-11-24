@@ -135,3 +135,61 @@ def test_legacy_reload_is_idempotent(db_session: Session) -> None:
     load_bhavcopy(db_session, D, **kw)
     again = load_bhavcopy(db_session, D, **kw)
     assert (again.inserted, again.updated) == (0, 0)
+
+
+def test_parse_mto_reads_the_date_despite_nses_rade_date_typo() -> None:
+    """Recorded on 2019-02-25: NSE's file says 'rade Date <25-FEB-2019>'."""
+    typo = MTO.replace("Trade Date <15-JUN-2021>", "rade Date <15-JUN-2021>")
+    assert parse_mto(typo, D)[("RELIANCE", "EQ")].delivery_qty == 2501188
+    both_gone = "\n".join(
+        ln for ln in typo.splitlines() if not ln.startswith("10,MTO") and "ade Date" not in ln
+    )
+    with pytest.raises(NseFormatError, match="no date header"):
+        parse_mto(both_gone, D)
+
+
+def test_parse_legacy_accepts_two_digit_years() -> None:
+    """Recorded on 2020-07-13: TIMESTAMP written as '13-Jul-20'."""
+    short = LEGACY.replace("15-JUN-2021", "15-Jun-21")
+    assert len(parse_legacy_bhavcopy(short, D)) == 12
+    with pytest.raises(NseFormatError, match="bad TIMESTAMP"):
+        parse_legacy_bhavcopy(LEGACY.replace("15-JUN-2021", "2021/06/15"), D)
+
+
+def test_an_excel_file_served_as_csv_is_refused() -> None:
+    """Recorded on 2022-08-08: sec_bhavdata_full_08082022.csv is an xlsx (zip) file."""
+    import httpx
+    import respx
+
+    from equitypulse.sources.nse import BHAVCOPY_DELIVERY_URL, NseNotCsv, fetch_bhavcopy_delivery
+
+    day = dt.date(2022, 8, 8)
+    with respx.mock:
+        respx.get(BHAVCOPY_DELIVERY_URL(day)).mock(
+            return_value=httpx.Response(200, content=b"PK\x03\x04[Content_Types].xml")
+        )
+        with pytest.raises(NseNotCsv, match="not CSV"):
+            fetch_bhavcopy_delivery(day)
+
+
+def test_legacy_date_uses_mto_when_the_full_file_is_not_csv(db_session: Session) -> None:
+    from equitypulse.sources.nse import NseNotCsv
+
+    def not_csv(_d: dt.date) -> str:
+        raise NseNotCsv("sec_bhavdata_full is a zip/xlsx file, not CSV")
+
+    load_bhavcopy(db_session, D, fetch_udiff=_fail, fetch_legacy=lambda _d: LEGACY,
+                  fetch_delivery=not_csv, fetch_mto=lambda _d: MTO)
+    assert db_session.get(PriceDaily, ("INE002A01018", D)).delivery_qty == 2501188
+    snap = db_session.scalar(select(Snapshot).where(Snapshot.endpoint == "bhavcopy-legacy"))
+    assert "MTO (full file not CSV)" in snap.payload_json
+
+
+def test_full_delivery_file_with_mixed_line_endings_parses() -> None:
+    mixed = FULL.replace("\n", "\r", 3)
+    assert parse_bhavcopy_delivery(mixed)[("RELIANCE", "EQ")].delivery_qty == 2501188
+
+
+def test_full_delivery_file_without_delivery_columns_is_refused() -> None:
+    with pytest.raises(NseFormatError, match="missing columns"):
+        parse_bhavcopy_delivery("SYMBOL,SERIES,CLOSE_PRICE\nX,EQ,1\n")
