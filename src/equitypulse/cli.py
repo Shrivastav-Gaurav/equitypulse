@@ -236,6 +236,46 @@ def coverage(
         raise typer.Exit(1)
 
 
+@app.command("ic-smoke")
+def ic_smoke(
+    from_date: dt.date = typer.Option(  # noqa: B008
+        dt.date(2019, 1, 1), "--from", formats=["%Y-%m-%d"], help="Window start"
+    ),
+    to_date: dt.date = typer.Option(  # noqa: B008
+        dt.date(2025, 11, 1), "--to", formats=["%Y-%m-%d"], help="Window end (<= holdout start)"
+    ),
+    out: str = typer.Option("docs/research/smoke_ic_price_factors.md", "--out"),
+) -> None:
+    """Price-factor IC smoke test on today's Nifty 500 (SURVIVORSHIP-BIASED). No Tapetide."""
+    from pathlib import Path
+
+    from equitypulse.calendar import today_ist
+    from equitypulse.db.session import session_factory
+    from equitypulse.index_load import open_members
+    from equitypulse.research.ic import Universe, holdout_start, run_ic_study
+    from equitypulse.research.report import write_report
+
+    today = today_ist()
+    with session_factory()() as session:
+        members = frozenset(open_members(session, "NIFTY500"))
+        universe = Universe(
+            name=f"NIFTY500 members as of {today}", members=lambda _d: members,
+            survivorship_biased=True,
+        )
+        study = run_ic_study(session, universe, from_date, to_date, holdout=holdout_start(today))
+    path = Path(out)
+    summaries = write_report(study, path, generated=today)
+    study.records.assign(universe=study.universe).to_csv(
+        path.with_name(path.stem + "_SURVIVORSHIP-BIASED.csv"), index=False
+    )
+    for s in summaries:
+        typer.echo(
+            f"{s.factor:20} {s.horizon:4} IC {s.mean_ic:+.3f}  positive {s.pct_positive:.0%}  "
+            f"periods {s.periods:3}  {'PASS' if s.passes else 'fail'}"
+        )
+    typer.echo(f"Report: {path} (SURVIVORSHIP-BIASED)")
+
+
 @app.command()
 def status() -> None:
     """Show freshness per source and Tapetide calls used today."""
