@@ -8,7 +8,9 @@
 Nothing dated after D is read. Rights and demergers carry no factor and change nothing.
 
 A chain link with no split or bonus within LINK_ACTION_WINDOW days of it is reported in
-`warnings`: the series would show a jump there, and the cause is a missing action.
+`warnings`: the series would show a jump there, and the cause is a missing action. A link whose
+reason was set by hand (config/manual_data.yaml, e.g. YES Bank's 2020 RECONSTRUCTION) is
+explained and not reported.
 """
 
 import datetime as dt
@@ -18,9 +20,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from equitypulse.db.models import CorporateAction, IsinLink, PriceDaily
+from equitypulse.isin_links import REASON as DETECTED_REASON
 
 LINK_ACTION_WINDOW = dt.timedelta(days=7)
-COLUMNS = ["date", "isin", "series", "open", "high", "low", "close", "volume", "factor"]
+# traded_value (rupees) and delivery_pct are not affected by splits and are passed through raw.
+COLUMNS = [
+    "date", "isin", "series", "open", "high", "low", "close", "volume", "traded_value",
+    "delivery_pct", "factor",
+]
 
 
 def chain_as_of(session: Session, isin: str, as_of: dt.date) -> list[str]:
@@ -52,7 +59,8 @@ def adjusted_prices(
     chain = chain_as_of(session, isin, as_of)
     q = select(
         PriceDaily.date, PriceDaily.isin, PriceDaily.series, PriceDaily.open, PriceDaily.high,
-        PriceDaily.low, PriceDaily.close, PriceDaily.volume,
+        PriceDaily.low, PriceDaily.close, PriceDaily.volume, PriceDaily.traded_value,
+        PriceDaily.delivery_pct,
     ).where(PriceDaily.isin.in_(chain), PriceDaily.date <= as_of)
     if start is not None:
         q = q.where(PriceDaily.date >= start)
@@ -90,7 +98,8 @@ def adjusted_prices(
     warnings = []
     for old, new, effective in session.execute(
         select(IsinLink.old_isin, IsinLink.new_isin, IsinLink.effective_date).where(
-            IsinLink.new_isin.in_(chain), IsinLink.effective_date <= as_of
+            IsinLink.new_isin.in_(chain), IsinLink.effective_date <= as_of,
+            IsinLink.reason == DETECTED_REASON,
         )
     ):
         if not any(abs(ex - effective) <= LINK_ACTION_WINDOW for ex, _ in actions):

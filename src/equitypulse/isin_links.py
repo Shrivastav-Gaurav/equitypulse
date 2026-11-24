@@ -53,8 +53,13 @@ class ChainUniverse(BaseModel):
 
     @classmethod
     def following_chains(cls, session: Session, isins: Iterable[str]) -> "ChainUniverse":
-        """Members plus any ISIN sharing a member's symbol (current or past) and issuer code."""
+        """Members, every ISIN already linked to a member (whatever symbol it traded under:
+        PCBL's old ISIN traded as PHILIPCARB), and any ISIN sharing a member's symbol (current
+        or past) and issuer code, which is how a link is found in the first place."""
         members = frozenset(isins)
+        linked = set(members)
+        for isin in members:
+            linked.update(chain_of(session, isin))
         by_symbol: dict[str, set[str]] = {}
         for isin, symbol in session.execute(
             select(Security.isin, Security.symbol).where(Security.isin.in_(members))
@@ -65,7 +70,8 @@ class ChainUniverse(BaseModel):
         ):
             by_symbol.setdefault(symbol, set()).add(issuer_code(isin))
         return cls(
-            isins=members, issuers_by_symbol={s: frozenset(v) for s, v in by_symbol.items()}
+            isins=frozenset(linked),
+            issuers_by_symbol={s: frozenset(v) for s, v in by_symbol.items()},
         )
 
 

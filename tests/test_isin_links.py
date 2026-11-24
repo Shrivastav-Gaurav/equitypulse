@@ -102,3 +102,17 @@ def test_strict_universe_keeps_only_listed_isins() -> None:
     u = ChainUniverse.strict({NEW})
     assert u.keeps(NEW, "KOTAKBANK")
     assert not u.keeps(OLD, "KOTAKBANK")
+
+
+def test_chain_universe_keeps_a_linked_isin_under_any_symbol(db_session: Session) -> None:
+    """PCBL: its old ISIN traded as PHILIPCARB until 2022-01-12, then as PCBL until the split."""
+    old, new = "INE602A01023", "INE602A01031"
+    _sec(db_session, old, "PCBL")
+    _sec(db_session, new, "PCBL")
+    db_session.flush()
+    db_session.add(IsinLink(old_isin=old, new_isin=new, effective_date=dt.date(2022, 4, 12),
+                            reason="ISIN_CHANGE", source="NSE_BHAVCOPY"))
+    db_session.flush()
+    u = ChainUniverse.following_chains(db_session, {new})
+    assert u.keeps(old, "PHILIPCARB")  # by ISIN: the symbol no longer matters
+    assert not u.keeps("INE602A01049", "PHILIPCARB")  # an unlinked ISIN still needs the symbol

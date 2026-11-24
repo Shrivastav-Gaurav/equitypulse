@@ -1,0 +1,59 @@
+# Hand-maintained facts that no free source records correctly. Each entry is verified against
+# NSE's own files or the stored data before it goes in; `ep manual-data` applies the file
+# (idempotent) and writes one data_audit "gap_review" row per explanation.
+
+# Price gaps that are not data errors. Days inside a period count as explained in coverage.
+gaps:
+  - isin: INE526E01018
+    symbol: SHRIPISTON
+    from: 2019-01-01
+    to: 2023-11-03
+    reason: >-
+      No trades on the missing days: illiquid BE (trade-for-trade) series until 2023, NSE listing
+      2016-06-02, one ISIN, continuous prices. Verified absent from the 2019-02-05 bhavcopy.
+  - isin: INE451A01017
+    symbol: FORCEMOT
+    from: 2019-01-01
+    to: 2019-08-16
+    reason: >-
+      Not trading on NSE (first NSE row 2019-08-19; NSE listing date 2024-02-14). Verified absent
+      from the 2019-02-05 and 2019-03-15 bhavcopies.
+  - isin: INE451A01017
+    symbol: FORCEMOT
+    from: 2023-10-26
+    to: 2024-02-13
+    reason: >-
+      Not trading on NSE until its NSE listing on 2024-02-14. Verified absent from the
+      2023-11-15 bhavcopy.
+
+  - isin: INE619A01035
+    symbol: PATANJALI
+    from: 2020-01-24
+    to: 2020-01-24
+    reason: >-
+      No trade on its NSE listing date: Ruchi Soya relisted after insolvency resolution and first
+      traded on 2020-01-27. Verified absent from the 2020-01-24 bhavcopy.
+
+# ISIN changes with no split or bonus next to them, and why.
+isin_links:
+  - old_isin: INE528G01027
+    new_isin: INE528G01035
+    symbol: YESBANK
+    reason: RECONSTRUCTION
+    note: >-
+      YES Bank reconstruction scheme, March 2020: new ISIN without a face-value change, so no
+      price factor.
+
+# Corporate actions missing from NSE's corporate-actions data. Demergers carry no factor, so
+# the T24 rule masks factors whose windows span them.
+corporate_actions:
+  - isin: INE530B01024
+    symbol: IIFL
+    ex_date: 2019-05-30
+    action_type: DEMERGER
+    details: IIFL Holdings demerged IIFL Securities and IIFL Wealth (close 417.45 -> 199.50)
+  - isin: INE836A01035
+    symbol: BSOFT
+    ex_date: 2019-01-24
+    action_type: DEMERGER
+    details: KPIT Technologies demerged its engineering business; the rest became Birlasoft (close 216.65 -> 128.95)

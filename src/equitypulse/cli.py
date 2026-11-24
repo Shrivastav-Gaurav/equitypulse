@@ -180,6 +180,62 @@ def corporate_actions(
     )
 
 
+@app.command("manual-data")
+def manual_data() -> None:
+    """Apply config/manual_data.yaml: explained gaps and links, hand-added demergers."""
+    from equitypulse.db.session import session_factory
+    from equitypulse.manual_data import apply_manual_data, load_manual_data
+
+    with session_factory()() as session:
+        result = apply_manual_data(session, load_manual_data())
+        session.commit()
+    typer.echo(
+        f"Manual data: {result.actions_added} actions added, {result.links_updated} links "
+        f"explained, {result.audit_rows_added} data_audit rows written"
+    )
+
+
+@app.command()
+def coverage(
+    from_date: dt.date = typer.Option(  # noqa: B008
+        ..., "--from", formats=["%Y-%m-%d"], help="First day (inclusive)"
+    ),
+    to_date: dt.date = typer.Option(  # noqa: B008
+        ..., "--to", formats=["%Y-%m-%d"], help="Last day (inclusive)"
+    ),
+    index: str = typer.Option("NIFTY500", "--index", help="Current members of this index"),
+) -> None:
+    """Missing price rows for an index's current members, and which gaps are explained."""
+    from equitypulse.coverage import price_coverage
+    from equitypulse.db.session import session_factory
+    from equitypulse.index_load import open_members
+    from equitypulse.manual_data import load_manual_data
+
+    with session_factory()() as session:
+        report = price_coverage(
+            session, open_members(session, index), from_date, to_date,
+            gap_notes=load_manual_data().gaps,
+        )
+    typer.echo(
+        f"{index} {from_date}..{to_date}: {report.securities} securities, expected "
+        f"{report.expected} rows, missing {report.missing} ({report.missing_pct:.4%}), "
+        f"explained {report.explained}, unexplained {report.unexplained} "
+        f"({report.unexplained_pct:.4%})"
+    )
+    typer.echo(f"  no equity rows: {', '.join(report.no_rows) or 'none'}")
+    for g in report.late_starts:
+        typer.echo(
+            f"  late start: {g.symbol} expected from {g.expected_start}, first row {g.first_row}"
+        )
+    for g in report.gaps:
+        typer.echo(
+            f"  gap: {g.symbol} {g.missing} days ({g.first_missing}..{g.last_missing}), "
+            f"explained {g.explained}"
+        )
+    if report.unexplained:
+        raise typer.Exit(1)
+
+
 @app.command()
 def status() -> None:
     """Show freshness per source and Tapetide calls used today."""
