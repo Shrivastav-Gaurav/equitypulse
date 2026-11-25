@@ -101,16 +101,20 @@ reads it.
 | Corporate actions (split/bonus) | NSE corporate-actions data | Free; ratios parsed to factors. Tapetide `get_adjustment_factors` only to cross-check a sample |
 | ISIN changes | Bhavcopy: same symbol, same issuer code (ISIN characters 3–7), consecutive dates | Rule exists (Phase 0 gate); 17 links found. A symbol match alone is never enough (symbols are recycled) |
 | Symbol changes | NSE symbol-change list (verify URL and columns) | Fills `symbol_history` with past symbols, so link detection also catches an ISIN change made before a rename (ACUTAAS: ISIN changed 2025-04-25 while still AMIORG) |
-| Historical Nifty 500 membership | Tapetide `get_index_membership_asof`, month-ends 2019 → today | About 95 calls, spread over days within the budget; cached forever |
+| Historical Nifty 500 membership | Tapetide `get_stock_index_memberships`: one call per stock, every membership spell with join and exit dates (and the dates bounding each) | Candidates = current Nifty 500 + every stock in `prices_daily` whose 20-day median traded value was ≥ ₹5 Cr at any month-end since 2019. `meta.coverage_from` is recorded per index; a spell whose join or exit is `uncertain`, or a date `out_of_coverage`, is never treated as member or non-member |
 | Index levels, TRI, India VIX | niftyindices.com / NSE archives | Verify the endpoint; Tapetide `get_index_history` / `get_india_vix` as fallback |
-| Fundamentals, ratios | Tapetide `get_batch_financials`, `get_screener_ratios` | Verify parameters, batch size, quarterly history depth (2018-Q1 onward, for YoY growth in 2019) and whether filing dates are returned, with ≤ 3 live calls before coding. No filing date → lag to quarter end + 45 days (Q4: + 60), the SEBI results deadlines |
-| Lender metrics | Tapetide `get_lender_metrics` | Banks, NBFCs, insurers only (about 60 names) |
+| Fundamentals, ratios | Tapetide `get_financials` with `section` (quarterly, profit_loss, balance_sheet, cash_flow, ratios) and `from` / `to` / `as_of`: up to 60 periods per call, paged with `meta.next_to`, each period with its point-in-time `availability.available_from` | `get_batch_financials` is for comparisons only (max 12 periods). `available_from` is the filing date; a period without one is lagged to quarter end + 45 days (Q4: + 60), the SEBI results deadlines |
+| Lender metrics | Tapetide `get_lender_metrics` | Banks covered from 2022, NBFCs from 2021. CASA and capital adequacy (CRAR) are not available |
 | Shareholding, pledge | Tapetide `get_shareholding`, `get_promoter_pledge` | For operator flags; quarterly |
 
-Every Tapetide call goes through `sources.tapetide` and its budget guard. **Tapetide's free access
-has ended** (22 Nov 2026: "The free plan covers 100 MCP tool calls a day for the first 7 days after
-signup"), so T17's cross-check, T19 and T22 need a paid plan; set `TAPETIDE_DAILY_BUDGET` to the
-plan's limit. Decide before T17 runs (open question 1).
+Every Tapetide call goes through `sources.tapetide` and its budget guard. Tapetide Starter is
+active (25 Nov 2026): 400 MCP calls a day and 5,000 a month, enforced as `TAPETIDE_DAILY_BUDGET=400`
+and `TAPETIDE_MONTHLY_BUDGET=5000` (the monthly limit is counted over a rolling 30 days).
+
+**Tapetide data ends with the subscription.** Tapetide's terms forbid using downloaded data after
+the subscription ends: `ep purge --source tapetide` deletes every Tapetide-sourced row and
+snapshot, and anything derived from them (fundamentals, lender metrics, Tapetide membership
+spells), and writes one `data_audit` row recording what was removed.
 
 ## Universe and gates
 
@@ -142,7 +146,7 @@ reason the Scan screen can show.
 | --- | --- |
 | Momentum | 1m/3m/6m adjusted return vs sector and vs Nifty 500; Minervini trend template (price > 50 > 150 > 200-day averages, 200-day rising); distance from 52-week high; 20-day breakout on volume |
 | Volume and delivery | Volume vs 20-day average; delivery % vs its 60-day average |
-| Quality | 3–5 year ROCE/ROE, Piotroski F, Beneish M (non-financials), D/E, pledge, cash conversion. **Lenders** use ROA, NIM, GNPA/NNPA trend, CASA (banks), capital adequacy, credit cost; promoter holding not scored |
+| Quality | 3–5 year ROCE/ROE, Piotroski F, Beneish M (non-financials), D/E, pledge, cash conversion. **Lenders** use ROA, NIM, GNPA/NNPA trend, credit cost, CET1/Tier 1 (CASA and CRAR are not available); promoter holding not scored. Lender Quality is "untested" before its coverage starts (banks 2022, NBFCs 2021) |
 | Valuation | P/E and EV/EBITDA vs own 5-year median and sector median; penalises only extreme expensiveness |
 | Reported growth | Latest-quarter YoY and QoQ sales and EPS growth; 3-year sales CAGR. Lenders use loan-book and net-interest-income growth. Filing-date-lagged financials only |
 
@@ -255,6 +259,11 @@ End-of-day data cannot show the order of moves inside a day, so the backtest is 
   code; a guard raises if a backtest window touches it. It is run once, in Phase 1b.
 - LLM output is never part of a backtested signal. Factors without point-in-time history are
   labelled "untested" on the card.
+- **Known look-ahead caveat: restated fundamentals.** Tapetide's `as_of` returns only figures that
+  were public by that date, but a figure may already include a later restatement. Every IC and
+  backtest output that uses fundamentals states this caveat next to its results.
+- Index membership spells marked `uncertain`, and dates outside an index's `coverage_from`, are
+  neither member nor non-member: the stock is left out of that date's universe and counted.
 
 ## Phase 1a gate (all must pass)
 
@@ -298,9 +307,7 @@ End-of-day data cannot show the order of moves inside a day, so the backtest is 
 
 ## Open questions
 
-1. Tapetide plan: free access has ended, and T19 (point-in-time membership) and T22
-   (fundamentals) depend on it. Buy Starter (₹499/month per the PRD, 400 calls/day), or replace
-   those sources (NSE index-change notices; company XBRL filings), which is much more work?
+1. Tapetide plan: resolved 25 Nov 2026, Starter (₹499/month, 400 calls/day, 5,000/month).
 2. Satellite capital and risk per trade (PRD open question) — needed for sizing defaults.
 3. Known-bad cases: a 16-stock starter set is in `tests/fixtures/known_bad.yaml`; T18 refines event
    dates from prices and T19 verifies Nifty 500 membership. The 10 golden stocks are fixed (gate check 3);
