@@ -485,3 +485,28 @@ def test_budget_refusal_does_not_count_an_attempt(db_session: Session) -> None:
                   **_kw(lambda t, a: SAMPLE_PAYLOAD, budget=1))
     db_session.rollback()
     assert _usage_rows(db_session) == [(1,)]
+
+
+# ── monthly guard (Starter plan: 5,000 calls a month) ────────────────────────
+
+
+def test_monthly_budget_counts_the_last_30_days(db_session: Session) -> None:
+    for days_ago, calls in ((0, 10), (10, 30), (29, 60), (30, 900)):  # 30 days ago: outside
+        db_session.add(ApiUsage(date=DATE - dt.timedelta(days=days_ago), source="TAPETIDE",
+                                calls=calls))
+    db_session.commit()
+    kw = dict(now=_NOW, _mcp_caller=_mock_caller, _budget=400, _sleep=lambda _s: None)
+    with pytest.raises(BudgetExceededError, match="monthly budget of 100"):
+        call_tool(db_session, "search_stocks", {"q": "m"}, entity="m", as_of=DATE,
+                  _monthly_budget=100, **kw)
+    result = call_tool(db_session, "search_stocks", {"q": "m"}, entity="m", as_of=DATE,
+                       _monthly_budget=101, **kw)
+    assert result["result"] == "ok"
+
+
+def test_the_daily_budget_still_applies_under_the_monthly_one(db_session: Session) -> None:
+    db_session.add(ApiUsage(date=DATE, source="TAPETIDE", calls=400))
+    db_session.commit()
+    with pytest.raises(BudgetExceededError, match="daily budget of 400"):
+        call_tool(db_session, "search_stocks", {"q": "d"}, entity="d", as_of=DATE, now=_NOW,
+                  _mcp_caller=_mock_caller, _budget=400, _monthly_budget=5000)

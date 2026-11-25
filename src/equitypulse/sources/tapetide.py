@@ -19,7 +19,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from equitypulse.calendar import today_ist
@@ -51,12 +51,21 @@ def _get_or_create_usage(session: Session, date: dt.date) -> ApiUsage:
     return row
 
 
+MONTHLY_WINDOW_DAYS = 30
+
+
 def _check_budget(
-    session: Session, now: dt.datetime | None = None, budget: int | None = None
+    session: Session,
+    now: dt.datetime | None = None,
+    budget: int | None = None,
+    monthly_budget: int | None = None,
 ) -> None:
-    """Raise BudgetExceededError if today's call count is at or above the daily budget."""
+    """Raise BudgetExceededError at the daily budget, or at the monthly budget counted over the
+    last 30 days (a rolling window never exceeds the plan, whatever day its billing month
+    starts). With a test override of `budget`, the monthly check runs only if one is given."""
     if budget is None:
-        budget = get_settings().tapetide_daily_budget
+        settings = get_settings()
+        budget, monthly_budget = settings.tapetide_daily_budget, settings.tapetide_monthly_budget
     today = today_ist(now)
     usage = _get_or_create_usage(session, today)
     if usage.calls >= budget:
@@ -64,6 +73,19 @@ def _check_budget(
             f"Tapetide daily budget of {budget} calls reached for {today} "
             f"(used {usage.calls}). Increase TAPETIDE_DAILY_BUDGET or wait until tomorrow."
         )
+    if monthly_budget is not None:
+        since = today - dt.timedelta(days=MONTHLY_WINDOW_DAYS - 1)
+        used = session.scalar(
+            select(func.coalesce(func.sum(ApiUsage.calls), 0)).where(
+                ApiUsage.source == SOURCE, ApiUsage.date.between(since, today)
+            )
+        )
+        if used >= monthly_budget:
+            raise BudgetExceededError(
+                f"Tapetide monthly budget of {monthly_budget} calls reached: {used} calls in "
+                f"the {MONTHLY_WINDOW_DAYS} days to {today}. Wait, or raise "
+                "TAPETIDE_MONTHLY_BUDGET if the plan allows."
+            )
 
 
 def _record_call(session: Session, now: dt.datetime | None = None) -> None:
@@ -74,7 +96,10 @@ def _record_call(session: Session, now: dt.datetime | None = None) -> None:
 
 
 def _reserve_call(
-    session: Session, now: dt.datetime | None = None, budget: int | None = None
+    session: Session,
+    now: dt.datetime | None = None,
+    budget: int | None = None,
+    monthly_budget: int | None = None,
 ) -> None:
     """Check the budget, count one attempt, and COMMIT before the request is sent.
 
@@ -82,7 +107,7 @@ def _reserve_call(
     allows one writer, so the count cannot use a separate connection while the caller holds
     pending writes; the caller's pending work is committed together with the count instead.
     """
-    _check_budget(session, now, budget=budget)
+    _check_budget(session, now, budget=budget, monthly_budget=monthly_budget)
     _record_call(session, now)
     session.commit()
 
@@ -200,6 +225,7 @@ def call_tool(
     now: dt.datetime | None = None,
     _mcp_caller: Any = None,  # injectable for tests
     _budget: int | None = None,  # test-only override; requires _mcp_caller
+    _monthly_budget: int | None = None,  # test-only, with _budget
     _sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     """Call a Tapetide MCP tool, respecting budget and caching.
@@ -225,7 +251,7 @@ def call_tool(
     caller = _mcp_caller or (lambda t, a: asyncio.run(_call_mcp_tool(t, a)))
     payload: dict[str, Any] = {}
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        _reserve_call(session, now, budget=_budget)
+        _reserve_call(session, now, budget=_budget, monthly_budget=_monthly_budget)
         try:
             payload = caller(tool, arguments)
             break

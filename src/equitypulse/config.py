@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import AliasChoices, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_ENV_FILE = Path(".env")
@@ -34,8 +34,12 @@ class Settings(BaseSettings):
 
     # Tapetide MCP: required, because Phase 0 ingestion depends on it.
     tapetide_mcp_url: str = "https://mcp.tapetide.com/mcp"
-    tapetide_api_token: SecretStr
-    tapetide_daily_budget: int = Field(default=45, ge=0)
+    # Read from TAPETIDE_API_TOKEN, or TAPETIDE_API_KEY if that is the name used.
+    tapetide_api_token: SecretStr = Field(
+        validation_alias=AliasChoices("TAPETIDE_API_TOKEN", "TAPETIDE_API_KEY")
+    )
+    tapetide_daily_budget: int = Field(default=400, ge=0)  # Starter: 400 MCP calls/day
+    tapetide_monthly_budget: int = Field(default=5000, ge=0)  # Starter: 5,000/month
 
     # LLM (later phases): optional until those phases need them.
     openrouter_api_key: SecretStr | None = None

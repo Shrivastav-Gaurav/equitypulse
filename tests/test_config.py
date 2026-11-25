@@ -70,7 +70,8 @@ def test_defaults_match_env_example(tmp_path: Path) -> None:
     s = load_settings(env_file=write_env(tmp_path, f"TAPETIDE_API_TOKEN={FAKE_TOKEN}\n"))
     assert s.database_url.get_secret_value() == "sqlite:///data/private/equitypulse.db"
     assert s.tapetide_mcp_url == "https://mcp.tapetide.com/mcp"
-    assert s.tapetide_daily_budget == 45
+    assert s.tapetide_daily_budget == 400
+    assert s.tapetide_monthly_budget == 5000
     assert s.langsmith_project == "equitypulse"
     assert s.nse_request_delay_seconds == 1.5
 
@@ -187,3 +188,14 @@ def test_default_env_file_is_not_the_real_one_in_tests() -> None:
     assert not Path(".env").exists()
     with pytest.raises(ConfigError):
         load_settings()
+
+
+def test_token_may_be_named_tapetide_api_key(tmp_path: Path) -> None:
+    s = load_settings(env_file=write_env(tmp_path, f"TAPETIDE_API_KEY={FAKE_TOKEN}\n"))
+    assert s.tapetide_api_token.get_secret_value() == FAKE_TOKEN
+    assert FAKE_TOKEN not in repr(s)
+
+
+def test_tapetide_api_token_wins_when_both_are_set(tmp_path: Path) -> None:
+    env = write_env(tmp_path, f"TAPETIDE_API_KEY=other\nTAPETIDE_API_TOKEN={FAKE_TOKEN}\n")
+    assert load_settings(env_file=env).tapetide_api_token.get_secret_value() == FAKE_TOKEN
