@@ -31,7 +31,7 @@ def _budget_from_stub_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """The budget guard reads settings; keep these tests independent of any real .env."""
     monkeypatch.setattr(
         "equitypulse.sources.tapetide.get_settings",
-        lambda: SimpleNamespace(tapetide_daily_budget=45),
+        lambda: SimpleNamespace(tapetide_daily_budget=45, tapetide_monthly_budget=5000),
     )
 
 
@@ -153,7 +153,7 @@ def test_fallback_stops_when_budget_is_exhausted(
 ) -> None:
     monkeypatch.setattr(
         "equitypulse.sources.tapetide.get_settings",
-        lambda: SimpleNamespace(tapetide_daily_budget=1),
+        lambda: SimpleNamespace(tapetide_daily_budget=1, tapetide_monthly_budget=5000),
     )
     for i, sym in enumerate(["AAA", "BBB", "CCC"]):
         _seed(db_session, isin=f"INE00000000{i}", symbol=sym)
